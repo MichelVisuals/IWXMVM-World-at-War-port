@@ -138,19 +138,7 @@ namespace IWXMVM::T4
 
         void InitializeGameAddresses() final
         {
-            try
-            {
-                GetGameAddresses();
-            }
-            catch (std::exception& ex)
-            {
-                LOG_ERROR("Failed to find required signature: {}", ex.what());
-                MessageBoxA(NULL,
-                            "Failed to locate required game addresses.\nMake sure you are running retail "
-                            "Steam Call of Duty: World at War (CoDWaWmp.exe).",
-                            "Unsupported game version", MB_OK);
-                ExitProcess(0);
-            }
+            GetGameAddresses();
         }
 
         std::optional<std::span<HMODULE>> GetModuleHandles(Types::ModuleType type = Types::ModuleType::BaseModule) final
