@@ -61,12 +61,15 @@ namespace IWXMVM::UI
                 // overlay just won't draw that frame fully).
                 GetUIComponent(Component::Background)->Render();
                 GetUIComponent(Component::MenuBar)->Render();
-                // GetUIComponent(Component::GameView)->Render();        // needs refdef / device wiring
-                // GetUIComponent(Component::PrimaryTabs)->Render();     // timeline/keyframes — needs demo state
-                // GetUIComponent(Component::ControlBar)->Render();      // playback transport — needs demo state
+                // GameView crashes even with d3d9DevicePointer wired — likely
+                // depends on refdef_s offsets or other unwired state. Skip until
+                // fixed.
+                // GetUIComponent(Component::GameView)->Render();
+                // GetUIComponent(Component::PrimaryTabs)->Render();
+                // GetUIComponent(Component::ControlBar)->Render();
                 GetUIComponent(Component::ControlsMenu)->Render();
                 GetUIComponent(Component::Preferences)->Render();
-                // GetUIComponent(Component::PlayerAnimation)->Render(); // needs anim state
+                // GetUIComponent(Component::PlayerAnimation)->Render();
                 GetUIComponent(Component::Credits)->Render();
             }
 

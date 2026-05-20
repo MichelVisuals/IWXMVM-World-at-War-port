@@ -63,7 +63,11 @@ namespace IWXMVM::T4::Signatures
         HAddr<0> clientObjMap;
         HAddr<0> objBuf;
         HAddr<0> CL_KeyEvent;
-        HAddr<0> d3d9DevicePointer;
+        // T4 MP DxGlobals struct at 0x1087DD04. Device field is at offset 4.
+        // So the address-of-device-pointer is 0x1087DD08. Note: unlike IW3,
+        // T4 stores the device pointer directly (single level of indirection)
+        // — see GetGameDevicePtr in T4Interface for the corresponding read.
+        HAddr<0x1087DD08> d3d9DevicePointer;
         // for rewinding
         HAddr<0> FS_Read;
         HAddr<0> fsh;

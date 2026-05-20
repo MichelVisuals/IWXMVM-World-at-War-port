@@ -336,6 +336,12 @@ namespace IWXMVM::D3D9
 
     void CheckPresenceReshade()
     {
+        // T4 port WIP: skip ReShade detection. With detection on, the code
+        // routes RunImGuiFrame through ReshadeOriginalEndScene_Hook which
+        // doesn't render cleanly in our incomplete binding. Re-enable when
+        // we know what the user expects from ReShade+IWXMVM coexistence.
+        LOG_DEBUG("CheckPresenceReshade skipped (T4 port WIP)");
+        return;
         // Null-safe: if game device pointer hasn't been wired up, skip Reshade
         // detection (it requires reading the game device's vtable).
         if (Mod::GetGameInterface()->GetGameDevicePtr() == nullptr)

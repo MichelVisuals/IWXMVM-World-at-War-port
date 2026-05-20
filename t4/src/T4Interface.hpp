@@ -115,12 +115,15 @@ namespace IWXMVM::T4
 
         IDirect3DDevice9* GetGameDevicePtr() const final
         {
-            // Null-safe: until the d3d9DevicePointer sig is wired up for T4,
-            // return nullptr so D3D9::Initialize can bail rather than AV.
             const auto addr = GetGameAddresses().d3d9DevicePointer();
             if (!addr)
+            {
+                LOG_DEBUG("GetGameDevicePtr: d3d9DevicePointer address is 0");
                 return nullptr;
-            return **(IDirect3DDevice9***)addr;
+            }
+            auto dev = *(IDirect3DDevice9**)addr;
+            LOG_DEBUG("GetGameDevicePtr: addr=0x{:X} -> device=0x{:X}", addr, (std::uintptr_t)dev);
+            return dev;
         }
 
         uintptr_t GetWndProc() final
