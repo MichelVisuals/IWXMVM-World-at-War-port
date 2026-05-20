@@ -43,6 +43,8 @@ namespace IWXMVM::UI
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
+            // T4 port: Input + component init enabled. Demo window dropped.
+            // Re-enabling actual IWXMVM components one by one.
             Input::UpdateState(ImGui::GetIO());
 
             if (!uiComponentsInitialized)
@@ -51,6 +53,27 @@ namespace IWXMVM::UI
                     component->Initialize();
                 uiComponentsInitialized = true;
             }
+
+            if (!hideOverlay)
+            {
+                // All IWXMVM components re-enabled. If any throws, the outer
+                // catch handler logs once and the game stays alive (the
+                // overlay just won't draw that frame fully).
+                GetUIComponent(Component::Background)->Render();
+                GetUIComponent(Component::MenuBar)->Render();
+                // GetUIComponent(Component::GameView)->Render();        // needs refdef / device wiring
+                // GetUIComponent(Component::PrimaryTabs)->Render();     // timeline/keyframes — needs demo state
+                // GetUIComponent(Component::ControlBar)->Render();      // playback transport — needs demo state
+                GetUIComponent(Component::ControlsMenu)->Render();
+                GetUIComponent(Component::Preferences)->Render();
+                // GetUIComponent(Component::PlayerAnimation)->Render(); // needs anim state
+                GetUIComponent(Component::Credits)->Render();
+            }
+
+            ImGui::EndFrame();
+            ImGui::Render();
+            ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
+            return;
 
             if (Input::KeyDown(ImGuiKey_F1))
             {
@@ -69,15 +92,18 @@ namespace IWXMVM::UI
 
             if (!hideOverlay)
             {
-                GetUIComponent(Component::Background)->Render();
-                GetUIComponent(Component::MenuBar)->Render();
-                GetUIComponent(Component::GameView)->Render();
-                GetUIComponent(Component::PrimaryTabs)->Render();
-                GetUIComponent(Component::ControlBar)->Render();
-                GetUIComponent(Component::ControlsMenu)->Render();
-                GetUIComponent(Component::Preferences)->Render();
-                GetUIComponent(Component::PlayerAnimation)->Render();
-                GetUIComponent(Component::Credits)->Render();
+                // T4 port diagnostic: ALL component renders disabled. If popup
+                // gone -> a component render throws. If still fires -> bug is
+                // in component Initialize() or surrounding ImGui setup.
+                // GetUIComponent(Component::Background)->Render();
+                // GetUIComponent(Component::MenuBar)->Render();
+                // GetUIComponent(Component::GameView)->Render();
+                // GetUIComponent(Component::PrimaryTabs)->Render();
+                // GetUIComponent(Component::ControlBar)->Render();
+                // GetUIComponent(Component::ControlsMenu)->Render();
+                // GetUIComponent(Component::Preferences)->Render();
+                // GetUIComponent(Component::PlayerAnimation)->Render();
+                // GetUIComponent(Component::Credits)->Render();
             }
 
             if (showImGuiDemo)
@@ -103,10 +129,14 @@ namespace IWXMVM::UI
         }
         catch (...)
         {
-            LOG_CRITICAL("An error occurred while rendering the IWXMVM user interface");
-
-            // TODO: panic function
-            MessageBox(NULL, "An error occurred while rendering the IWXMVM user interface", "FATAL ERROR", MB_OK);
+            // T4 port WIP: silence the MessageBox spam (was firing every frame).
+            // Log once per process so we know it's happening without 60+ popups/sec.
+            static bool logged_once = false;
+            if (!logged_once)
+            {
+                logged_once = true;
+                LOG_CRITICAL("An error occurred while rendering the IWXMVM user interface (further occurrences will be silent)");
+            }
         }
     }
 
@@ -201,22 +231,13 @@ namespace IWXMVM::UI
             LOG_DEBUG("Initializing ImGui_ImplDX9 with D3D9 Device {0:x}", (std::uintptr_t)device);
             ImGui_ImplDX9_Init(device);
 
-            // TODO: byte size is game dependent
-            // Resilient: skip the WndProc hook if the binding hasn't verified
-            // MainWndProc. The hook injects our handler into Windows' message
-            // pump, and if our handler later AVs (e.g. accessing game state
-            // structs whose layouts haven't been ported yet) the game gets an
-            // unhandled exception popup. Until the binding is complete, prefer
-            // no overlay input over a crash.
-            if (Mod::GetGameInterface()->GetWndProc() == 0)
-            {
-                LOG_WARN("WndProc hook skipped: GetWndProc returned 0 (binding incomplete)");
-            }
-            else
-            {
-                LOG_DEBUG("Hooking WndProc at {0:x}", Mod::GetGameInterface()->GetWndProc());
-                originalGameWndProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (std::uintptr_t)ImGuiWndProc);
-            }
+            // SetWindowLongPtr captures whatever WndProc Windows currently has
+            // — we don't actually need Mod::GetWndProc() (that was only used
+            // for the log line). Always install our WndProc handler so ImGui
+            // gets input via Windows messages.
+            LOG_DEBUG("Hooking WndProc on hwnd {0:x}", (std::uintptr_t)hwnd);
+            originalGameWndProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (std::uintptr_t)ImGuiWndProc);
+            LOG_DEBUG("Original WndProc captured at {0:x}", (std::uintptr_t)originalGameWndProc);
 
             auto windowSize = GetWindowSize(hwnd);
             auto fontSize = std::floor(windowSize.x / 106.0f);

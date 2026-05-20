@@ -163,7 +163,29 @@ namespace IWXMVM::D3D9
     std::size_t reshadeEndSceneCallCount;
     HRESULT __stdcall EndScene_Hook(IDirect3DDevice9* pDevice)
     {
+        // T4 port diagnostic: init + CheckForOverlays + RunImGuiFrame.
+        // If stable -> we should see the IWXMVM overlay!
+        // If crashes -> RunImGuiFrame is the issue.
+        static bool init_done = false;
+        if (!init_done)
+        {
+            init_done = true;
+            device = pDevice;
+            UI::UIManager::Get().Initialize(pDevice);
+            GFX::GraphicsManager::Get().Initialize();
+        }
+
         const std::uintptr_t returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+        if (CheckForOverlays(returnAddress))
+        {
+            return EndScene(pDevice);
+        }
+
+        UI::UIManager::Get().RunImGuiFrame();
+
+        return EndScene(pDevice);
+
+        // Unreachable below — kept for restoration when we figure out the issue.
         if (CheckForOverlays(returnAddress))
         {
             return EndScene(pDevice);
@@ -465,11 +487,10 @@ namespace IWXMVM::D3D9
     {
         FindSwapChain();
         CreateDummyDevice();
-        // T4 port WIP: NUCLEAR DIAGNOSTIC — skip the entire D3D9 Hook() installation
-        // to confirm whether our function-level d3d9 hooks are what's crashing
-        // the game (vs. something else in init).
-        // Hook();
-        LOG_DEBUG("D3D9 Hook() skipped (T4 port diagnostic)");
+        // T4 port diagnostic: install ALL hooks again, but EndScene_Hook is still
+        // a pass-through body. If still stable -> OTHER hooks were never the issue;
+        // EndScene body is. If crashes -> one of the OTHER hooks is broken.
+        Hook();
         LOG_DEBUG("Hooked D3D9");
 
         // T4 port: skip vid_restart. The original path uses it to force device
