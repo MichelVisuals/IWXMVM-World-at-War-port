@@ -208,10 +208,14 @@ namespace IWXMVM::D3D9
             GFX::GraphicsManager::Get().Render();
         }
 
-        if (!reshadeEndSceneAddress.has_value())
-        {
-            UI::UIManager::Get().RunImGuiFrame();
-        }
+        // T4 port WIP: skip ImGui frame render in EndScene to diagnose whether
+        // overlay rendering is what's crashing the game. If WaW stays alive
+        // with this disabled, the crash is somewhere in the ImGui/IWXMVM UI
+        // rendering path; we'll re-enable component-by-component.
+        // if (!reshadeEndSceneAddress.has_value())
+        // {
+        //     UI::UIManager::Get().RunImGuiFrame();
+        // }
 
         return EndScene(pDevice);
     }
@@ -310,6 +314,13 @@ namespace IWXMVM::D3D9
 
     void CheckPresenceReshade()
     {
+        // Null-safe: if game device pointer hasn't been wired up, skip Reshade
+        // detection (it requires reading the game device's vtable).
+        if (Mod::GetGameInterface()->GetGameDevicePtr() == nullptr)
+        {
+            LOG_WARN("CheckPresenceReshade skipped: game device pointer is null");
+            return;
+        }
         auto IsReshadeDllPresent = [](auto dllName) {
             const std::filesystem::path gamePath(PathUtils::GetCurrentGameDirectory());
             const auto reshadePath = gamePath / dllName;
@@ -364,20 +375,27 @@ namespace IWXMVM::D3D9
     {
         const auto device = Mod::GetGameInterface()->GetGameDevicePtr();
 
+        // Null-safe: skip cleanly if game device pointer not yet wired up
+        // (T4 port in progress; some sigs unresolved). SwapChain vtable stays
+        // zero-initialized so HookManager::CreateHook null-guard handles it.
+        if (!device)
+        {
+            LOG_WARN("FindSwapChain skipped: game device pointer is null");
+            return;
+        }
+
         IDirect3DSwapChain9* pSwapChain = nullptr;
         const HRESULT hr = device->GetSwapChain(0, &pSwapChain);
 
         if (FAILED(hr) || !pSwapChain)
         {
-            throw std::runtime_error("Failed to find D3D9 SwapChain!");
+            LOG_WARN("Failed to find D3D9 SwapChain (continuing)");
+            return;
         }
-        else
-        {
-            memcpy(d3d9SwapChainVTable, *(void**)pSwapChain, 10 * sizeof(void*));
-            pSwapChain->Release();
 
-            LOG_DEBUG("Found D3D9 SwapChain Present address: {}", d3d9SwapChainVTable[3]);
-        }
+        memcpy(d3d9SwapChainVTable, *(void**)pSwapChain, 10 * sizeof(void*));
+        pSwapChain->Release();
+        LOG_DEBUG("Found D3D9 SwapChain Present address: {}", d3d9SwapChainVTable[3]);
     }
 
     void CreateDummyDevice()
@@ -447,14 +465,29 @@ namespace IWXMVM::D3D9
     {
         FindSwapChain();
         CreateDummyDevice();
-        Hook();
+        // T4 port WIP: NUCLEAR DIAGNOSTIC — skip the entire D3D9 Hook() installation
+        // to confirm whether our function-level d3d9 hooks are what's crashing
+        // the game (vs. something else in init).
+        // Hook();
+        LOG_DEBUG("D3D9 Hook() skipped (T4 port diagnostic)");
         LOG_DEBUG("Hooked D3D9");
 
-        if (!IsReshadePresent())
-        {
-            LOG_DEBUG("Triggering vid_restart since Reshade is not present");
-            Mod::GetGameInterface()->Vid_Restart();
-        }
+        // T4 port: skip vid_restart. The original path uses it to force device
+        // re-creation so CreateDevice_Hook fires and we get the game's device,
+        // but our injector loads AFTER the game has booted — the device
+        // already exists. EndScene_Hook will pick it up on the next frame via
+        // the `device = pDevice` path. Triggering vid_restart here crashed the
+        // game on first frame after device destruction (memory state shifting
+        // during render).
+        //
+        // TODO: re-enable when game device pointer + WndProc are wired
+        //       (or detect reshade properly first).
+        // if (!IsReshadePresent())
+        // {
+        //     LOG_DEBUG("Triggering vid_restart since Reshade is not present");
+        //     Mod::GetGameInterface()->Vid_Restart();
+        // }
+        LOG_DEBUG("Skipping vid_restart (T4 port WIP)");
     }
 
     HWND FindWindowHandle()

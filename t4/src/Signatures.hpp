@@ -12,83 +12,83 @@ namespace IWXMVM::T4::Signatures
 
         using GAType = IWXMVM::Signatures::GameAddressType;
 
-        Sig("51 8D 90 ?? ?? ?? ?? 52 50 E8 ?? ?? ?? ?? 68 ?? ?? ?? ?? 57", GAType::Code, 20,
-            Lambda::FollowCodeFlow) > fopen;
-        Sig("53 8D 4C 24 ?? E8 ?? ?? ?? ?? 8D 54 24 ?? 8D 74 24 ?? 8B D8", GAType::Code, 20,
-            Lambda::FollowCodeFlow) > AnglesToAxis;
-        // T4 MP 0x0055C000 — confirmed via Ghidra (contains "Cbuf_AddText: overflow" string).
-        // t4-rtx documents 0x55C130 but that's a different function. 73 callers in CoDWaWmp.exe.
+        // ============================================================
+        // T4 (WaW) port: signature table
+        // ============================================================
+        // Strategy: short IW3 byte signatures (5-12 bytes) frequently
+        // produce false positives in T4's 4 MB .text section, which then
+        // causes hooks to install at garbage addresses and crash the
+        // game with an access violation downstream. So until each entry
+        // is properly verified for T4, we point it at HardAddr<0> — the
+        // resilient framework (Patch / HookManager / D3D9::Initialize)
+        // skips null addresses cleanly and logs a warning.
+        //
+        // Verified T4 entries use HardAddr<address>. As we identify more,
+        // they get moved into the verified section.
+        // ============================================================
+
+        // ---- VERIFIED (Ghidra + t4-rtx) ----
+        // 0x0055C000 — Ghidra confirmed via "Cbuf_AddText: overflow" string. 73 callers.
         HAddr<0x0055C000> Cbuf_AddText;
-        Sig("83 C7 10 8B 8E ?? 00 00 00 3B 0D ?? ?? ?? 00", GAType::Code,
-            15) > CG_AddPlayerSpriteDrawSurfs;  // killcam 'you' marker
-        Sig("C3 F6 05 ?? ?? ?? 00 10", GAType::Code, 8) > CL_CGameRendering;  // hide class menus
-        Sig("8B C5 E8 ?? ?? ?? ?? BA", GAType::Code, 17) > CG_CalcViewValues;  // first call to AnglesToAxis we need to replace
-        Sig("5C 24 ?? 55 8B 6C 24 ?? 56 8D 44 24 ?? 50 51 8B CB C6 44 24", GAType::Code, -5) > CG_DObjGetWorldTagMatrix;
-        Sig("00 53 56 57 8B F0 0F 85 ?? ?? ?? ?? 8D 44 24", GAType::Code, -9) > CG_DrawDisconnect;
-        Sig("8D 74 24 ?? D9 5C 24 ?? ?? ?? ?? ?? ?? 5F 5E 5B 8B E5 5D C3", GAType::Code,
-            8) > CG_OffsetThirdPersonView;  // second call to AnglesToAxis we need to replace
-        // T4 MP 0x005C4170 — t4-rtx confirmed, Ghidra verified as function entry (41 bytes).
+        // 0x005C4170 — t4-rtx confirmed, Ghidra-verified function entry (41 bytes).
         HAddr<0x005C4170> Dvar_FindMalleableVar;
-        Sig("83 EC ?? D9 46 ?? D9 1D ?? ?? ?? ?? D9 46 ?? D9 1D", GAType::Code, -6) > FX_SetupCamera;
-        Sig("8B F8 6A 00 57 E8 ?? ?? ?? ?? D9 46 ?? D9 9F", GAType::Code, -7) > R_SetViewParmsForScene;
-        Sig("8B C6 59 C3 56 E8 ?? ?? ?? ?? 83 C4 04 ?? ?? ?? ?? ?? CC", GAType::Code, 13) > SV_Frame;
-        Sig("BA ?? ?? ?? ?? E8 ?? ?? ?? ?? 80 3D", GAType::Data, 1, Lambda::DereferenceAddress) > clientConnection;
-        Sig("68 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 C4 0C 68 ?? ?? ?? ?? C1 E6 04", GAType::Data, 1,
-            Lambda::DereferenceAddress) > clientStatic;
-        Sig("05 ?? ?? ?? ?? B9 01 00 00 00 01 88 B8 56 02 00", GAType::Data, 1,
-            Lambda::DereferenceAddress) > clientActive;
-        Sig("68 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 C4 0C 68 F0 E7 0F 00", GAType::Data, 1,
-            Lambda::DereferenceAddress) > clientGlobalsStatic;
-        Sig("BA ?? ?? ?? ?? E8 ?? ?? ?? ?? D9 03", GAType::Data, 1, Lambda::DereferenceAddress) > clientGlobals;
-        Sig("89 1D ?? ?? ?? ?? 5E 5F", GAType::Data, 2, Lambda::DereferenceAddress) > mouseVars;
-        Sig("8B 1D ?? ?? ?? ?? 85 DB 74 E0", GAType::Data, 2) > fs_searchpaths;
-        Sig("F8 83 EC 3C 53 56 57", GAType::Code, -5) > MainWndProc;
-        Sig("?? ?? ?? ?? ?? 81 EC ?? ?? ?? ?? 8D 80 ?? ?? ?? ?? 8D 54 24 ?? 56", GAType::Code, 22) > CG_RegisterItems;
-        Sig("C6 05 ?? ?? ?? ?? 01 88 9E", GAType::Data, 2, Lambda::DereferenceAddress) > clientUIActives;
-        Sig("5C 24 20 55 56 8B 74 24 20", GAType::Code, -5) > SL_GetStringOfSize;
-        Sig("69 C9 00 70 07 00 83 C4 0C 68 00 70 07 00 81", GAType::Data, 16, Lambda::DereferenceAddress) > cg_entities;
-        Sig("5C 24 38 55 8B 6C 24 40 57 8B F9", GAType::Code, -5) > CG_DObjGetWorldBoneMatrix;
-        Sig("03 44 24 04 0F B7 04 45", GAType::Data, 8, Lambda::DereferenceAddress) > clientObjMap;
-        Sig("0F BF F0 6B F6 64 81 C6", GAType::Data, 8, Lambda::DereferenceAddress) > objBuf;
-        Sig("0F B6 80 ?? ?? ?? ?? FF 24 85 ?? ?? ?? ?? 83 3D ?? ?? ?? ?? 00 75", GAType::Code, 22) > CL_KeyEvent;
-        Sig("8B 0D ?? ?? ?? ?? 8B 40 04 8B 11 83 C6 04", GAType::Data, 2) > d3d9DevicePointer;
-
-        // for rewinding
-        Sig("83 C4 ?? 53 57 56 ?? ?? ?? ?? ?? 83 C4", GAType::Code, 6, Lambda::FollowCodeFlow) > FS_Read;
-        Sig("89 86 ?? ?? ?? ?? E8 ?? ?? ?? ?? 88 9F FF 00 00 00", GAType::Data, 2, Lambda::DereferenceAddress) > fsh;
-        Sig("68 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 83 C4 0C 88 1D", GAType::Data, 1,
-            Lambda::DereferenceAddress) > lastValidBasepath;
-        Sig("68 ?? ?? ?? ?? 89 1E", GAType::Data, 1, Lambda::DereferenceAddress) > s_compassActors;
-        Sig("39 8C 07 ?? ?? ?? ?? 5F", GAType::Data, 3, Lambda::DereferenceAddress) > conGameMsgWindow0; // killfeed
-        Sig("83 3D ?? ?? ?? ?? ?? 0F 85 92 01 00 00", GAType::Code, -5,
-            Lambda::FollowCodeFlow) > CL_FirstSnapshot;
-        Sig("8B 15 ?? ?? ?? ?? 8B 42 0C 83 C4 04 80 38 00", GAType::Code, -5) > Con_TimeJumpedCall;
-        Sig("8B C7 69 C0 58 02 00 00", GAType::Code, -5) > CG_MapRestartSetThirdpersonCall;
-
-        // for depth patch
-        Sig("33 D2 85 F6 57 74 4A", GAType::Code, -5) > R_DoesDrawSurfListInfoNeedFloatz;
-
-        // for changing (death) animations
-        Sig("E8 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 83 F8 0E 0F 87", GAType::Code, 5) > CG_ProcessEntity;
-
-        Sig("55 8B 6C 24 38 85 ED", GAType::Code, -5) > R_AddCmdDrawTextWithEffects;
-        Sig("83 3D ?? ?? ?? ?? 09 75 ?? ?? ?? ?? ?? ?? 8B CD", GAType::Code, 9, Lambda::FollowCodeFlow) > IN_Frame;
-
-        Sig("51 08 53 8B 5C", GAType::Code, -5) > R_SetupMaterial;
-        // T4 MP 0x006BBA90 — t4-rtx confirmed, Ghidra verified as function entry (15 bytes).
+        // 0x006BBA90 — t4-rtx confirmed, Ghidra-verified function entry (15 bytes).
         HAddr<0x006BBA90> Material_RegisterHandle;
-        Sig("E8 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 33 C0 A3", GAType::Data, -4, Lambda::DereferenceAddress) > rgp;
 
-        Sig("83 C4 2C 5D 5B 59", GAType::Code, -5) > CG_DrawPlayerLowHealthOverlay;
-        Sig("0F 84 C9 00 00 00 8B 81 FC 03 05 00", GAType::Code, -7) > CG_DrawFlashDamage;
-        Sig("53 56 57 0F 84 EE 01 00 00", GAType::Code, -10) > CG_DrawDamageDirectionIndicators;
-
-        Sig("83 EC 14 53 8B 5D 08 56 57 8B F8 E8 ?? ?? ?? ?? 8B F0 85 F6 74 0E", GAType::Code, -6) > Dvar_SetStringByName;
-        Sig("E8 ?? ?? ?? ?? 8B BB ?? ?? ?? ?? 8B F5", GAType::Code, 13,
-            Lambda::FollowCodeFlow) > CG_ExecuteNewServerCommands;
-
+        // ---- TO BE WIRED UP (zero until reversed) ----
+        HAddr<0> fopen;
+        HAddr<0> AnglesToAxis;
+        HAddr<0> CG_AddPlayerSpriteDrawSurfs;
+        HAddr<0> CL_CGameRendering;
+        HAddr<0> CG_CalcViewValues;
+        HAddr<0> CG_DObjGetWorldTagMatrix;
+        HAddr<0> CG_DrawDisconnect;
+        HAddr<0> CG_OffsetThirdPersonView;
+        HAddr<0> FX_SetupCamera;
+        HAddr<0> R_SetViewParmsForScene;
+        HAddr<0> SV_Frame;
+        HAddr<0> clientConnection;
+        HAddr<0> clientStatic;
+        HAddr<0> clientActive;
+        HAddr<0> clientGlobalsStatic;
+        HAddr<0> clientGlobals;
+        HAddr<0> mouseVars;
+        HAddr<0> fs_searchpaths;
+        HAddr<0> MainWndProc;
+        HAddr<0> CG_RegisterItems;
+        HAddr<0> clientUIActives;
+        HAddr<0> SL_GetStringOfSize;
+        HAddr<0> cg_entities;
+        HAddr<0> CG_DObjGetWorldBoneMatrix;
+        HAddr<0> clientObjMap;
+        HAddr<0> objBuf;
+        HAddr<0> CL_KeyEvent;
+        HAddr<0> d3d9DevicePointer;
+        // for rewinding
+        HAddr<0> FS_Read;
+        HAddr<0> fsh;
+        HAddr<0> lastValidBasepath;
+        HAddr<0> s_compassActors;
+        HAddr<0> conGameMsgWindow0;
+        HAddr<0> CL_FirstSnapshot;
+        HAddr<0> Con_TimeJumpedCall;
+        HAddr<0> CG_MapRestartSetThirdpersonCall;
+        // for depth patch
+        HAddr<0> R_DoesDrawSurfListInfoNeedFloatz;
+        // for changing (death) animations
+        HAddr<0> CG_ProcessEntity;
+        HAddr<0> R_AddCmdDrawTextWithEffects;
+        HAddr<0> IN_Frame;
+        HAddr<0> R_SetupMaterial;
+        HAddr<0> rgp;
+        HAddr<0> CG_DrawPlayerLowHealthOverlay;
+        HAddr<0> CG_DrawFlashDamage;
+        HAddr<0> CG_DrawDamageDirectionIndicators;
+        HAddr<0> Dvar_SetStringByName;
+        HAddr<0> CG_ExecuteNewServerCommands;
 
 #undef Sig
+#undef HAddr
 #undef Lambda
     };
 }  // namespace IWXMVM::T4::Signatures

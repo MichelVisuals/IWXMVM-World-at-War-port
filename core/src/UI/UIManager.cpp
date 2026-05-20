@@ -202,8 +202,21 @@ namespace IWXMVM::UI
             ImGui_ImplDX9_Init(device);
 
             // TODO: byte size is game dependent
-            LOG_DEBUG("Hooking WndProc at {0:x}", Mod::GetGameInterface()->GetWndProc());
-            originalGameWndProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (std::uintptr_t)ImGuiWndProc);
+            // Resilient: skip the WndProc hook if the binding hasn't verified
+            // MainWndProc. The hook injects our handler into Windows' message
+            // pump, and if our handler later AVs (e.g. accessing game state
+            // structs whose layouts haven't been ported yet) the game gets an
+            // unhandled exception popup. Until the binding is complete, prefer
+            // no overlay input over a crash.
+            if (Mod::GetGameInterface()->GetWndProc() == 0)
+            {
+                LOG_WARN("WndProc hook skipped: GetWndProc returned 0 (binding incomplete)");
+            }
+            else
+            {
+                LOG_DEBUG("Hooking WndProc at {0:x}", Mod::GetGameInterface()->GetWndProc());
+                originalGameWndProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (std::uintptr_t)ImGuiWndProc);
+            }
 
             auto windowSize = GetWindowSize(hwnd);
             auto fontSize = std::floor(windowSize.x / 106.0f);

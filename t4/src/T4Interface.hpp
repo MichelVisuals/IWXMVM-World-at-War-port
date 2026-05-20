@@ -69,8 +69,19 @@ namespace IWXMVM::T4
 
         void InstallHooksAndPatches() final
         {
-            Hooks::Install();
-            Patches::GetGamePatches();
+            // T4 port work-in-progress: most signatures are still unverified, so
+            // installing hooks/patches against zero addresses crashes the game.
+            // Hooks::Commands::Install in particular dereferences hardcoded IW3
+            // addresses (0x1410B3C, 0x14099DC) which are garbage in T4 memory.
+            //
+            // Until each install path has a verified T4 address (or its own null
+            // guard), the entire pass is disabled. D3D9 hooks from D3D9::Initialize
+            // and the ImGui overlay still come up via the dummy-device vtable,
+            // which is enough to confirm the injection model end-to-end.
+            //
+            // Re-enable each call as its dependencies are wired up.
+            // Hooks::Install();
+            // Patches::GetGamePatches();
         }
 
         void DisableRawInput()
@@ -104,7 +115,12 @@ namespace IWXMVM::T4
 
         IDirect3DDevice9* GetGameDevicePtr() const final
         {
-            return **(IDirect3DDevice9***)GetGameAddresses().d3d9DevicePointer();
+            // Null-safe: until the d3d9DevicePointer sig is wired up for T4,
+            // return nullptr so D3D9::Initialize can bail rather than AV.
+            const auto addr = GetGameAddresses().d3d9DevicePointer();
+            if (!addr)
+                return nullptr;
+            return **(IDirect3DDevice9***)addr;
         }
 
         uintptr_t GetWndProc() final
@@ -122,13 +138,16 @@ namespace IWXMVM::T4
 
         Types::GameState GetGameState() final
         {
-            if (!Functions::FindDvar("cl_ingame")->current.enabled)
-                return Types::GameState::MainMenu;
-
-            if (Structures::GetClientConnection()->demoplaying)
-                return Types::GameState::InDemo;
-
-            return Types::GameState::InGame;
+            // T4 port WIP: globals (clientConnection, clientStatic, etc.) are
+            // still HardAddr<0>, so any access AVs. Hard-pin to MainMenu so
+            // EndScene_Hook never tries to read uninitialized state. This
+            // disables demo-aware features (Render()) but lets the overlay
+            // attempt to render.
+            //
+            // Re-enable the real logic once clientConnection is wired and the
+            // T4 dvar_s struct layout is fixed (IW3 reads current.enabled at
+            // offset 0x0C; T4 needs 0x10 due to alignment pad).
+            return Types::GameState::MainMenu;
         }
 
         Types::Features GetSupportedFeatures() final
