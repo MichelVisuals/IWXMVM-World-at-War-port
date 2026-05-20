@@ -246,10 +246,23 @@ namespace IWXMVM::Signatures
     template <auto intSignature, Types::ModuleType type = Types::ModuleType::BaseModule>
     struct Signature
     {
-        constexpr Signature()
+        Signature()
         {
             if (const auto modules = Mod::GetGameInterface()->GetModuleHandles(type); modules.has_value())
-                _address = _signature.Scan(modules.value());
+            {
+                try
+                {
+                    _address = _signature.Scan(modules.value());
+                }
+                catch (const std::exception& ex)
+                {
+                    // Resilient mode: log and continue so partial sig coverage doesn't kill init.
+                    // Callers of GetAddress() get 0 for unresolved sigs; their hooks/calls will no-op
+                    // or fail at use-time, but the rest of init proceeds.
+                    LOG_WARN("Signature scan failed (continuing): {}", ex.what());
+                    _address = 0;
+                }
+            }
         }
 
         static constexpr auto _signature = intSignature;
