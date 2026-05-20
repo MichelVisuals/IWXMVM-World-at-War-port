@@ -7,6 +7,7 @@ namespace IWXMVM::T4::Signatures
     struct T4Addresses
     {
 #define Sig IWXMVM::Signatures::Signature < IWXMVM::Signatures::SignatureImpl
+#define HAddr IWXMVM::Signatures::HardAddr
 #define Lambda IWXMVM::Signatures::Lambdas
 
         using GAType = IWXMVM::Signatures::GameAddressType;
@@ -15,7 +16,9 @@ namespace IWXMVM::T4::Signatures
             Lambda::FollowCodeFlow) > fopen;
         Sig("53 8D 4C 24 ?? E8 ?? ?? ?? ?? 8D 54 24 ?? 8D 74 24 ?? 8B D8", GAType::Code, 20,
             Lambda::FollowCodeFlow) > AnglesToAxis;
-        Sig("8B F0 8B F9 FF 15 ?? ?? ?? ?? 8A 06", GAType::Code, -8) > Cbuf_AddText;
+        // T4 MP 0x0055C000 — confirmed via Ghidra (contains "Cbuf_AddText: overflow" string).
+        // t4-rtx documents 0x55C130 but that's a different function. 73 callers in CoDWaWmp.exe.
+        HAddr<0x0055C000> Cbuf_AddText;
         Sig("83 C7 10 8B 8E ?? 00 00 00 3B 0D ?? ?? ?? 00", GAType::Code,
             15) > CG_AddPlayerSpriteDrawSurfs;  // killcam 'you' marker
         Sig("C3 F6 05 ?? ?? ?? 00 10", GAType::Code, 8) > CL_CGameRendering;  // hide class menus
@@ -24,8 +27,8 @@ namespace IWXMVM::T4::Signatures
         Sig("00 53 56 57 8B F0 0F 85 ?? ?? ?? ?? 8D 44 24", GAType::Code, -9) > CG_DrawDisconnect;
         Sig("8D 74 24 ?? D9 5C 24 ?? ?? ?? ?? ?? ?? 5F 5E 5B 8B E5 5D C3", GAType::Code,
             8) > CG_OffsetThirdPersonView;  // second call to AnglesToAxis we need to replace
-        Sig("85 C0 74 ?? 8B FE E8 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? D9 41 ?? D8 4C 24 0C D9 5E 0C 5F 5E C3", GAType::Code,
-            -5, Lambda::FollowCodeFlow) > Dvar_FindMalleableVar;
+        // T4 MP 0x005C4170 — t4-rtx confirmed, Ghidra verified as function entry (41 bytes).
+        HAddr<0x005C4170> Dvar_FindMalleableVar;
         Sig("83 EC ?? D9 46 ?? D9 1D ?? ?? ?? ?? D9 46 ?? D9 1D", GAType::Code, -6) > FX_SetupCamera;
         Sig("8B F8 6A 00 57 E8 ?? ?? ?? ?? D9 46 ?? D9 9F", GAType::Code, -7) > R_SetViewParmsForScene;
         Sig("8B C6 59 C3 56 E8 ?? ?? ?? ?? 83 C4 04 ?? ?? ?? ?? ?? CC", GAType::Code, 13) > SV_Frame;
@@ -72,7 +75,8 @@ namespace IWXMVM::T4::Signatures
         Sig("83 3D ?? ?? ?? ?? 09 75 ?? ?? ?? ?? ?? ?? 8B CD", GAType::Code, 9, Lambda::FollowCodeFlow) > IN_Frame;
 
         Sig("51 08 53 8B 5C", GAType::Code, -5) > R_SetupMaterial;
-        Sig("A1 ?? ?? ?? ?? C3 A1 ?? ?? ?? ?? 80 78 0C 00", GAType::Code, -5) > Material_RegisterHandle;
+        // T4 MP 0x006BBA90 — t4-rtx confirmed, Ghidra verified as function entry (15 bytes).
+        HAddr<0x006BBA90> Material_RegisterHandle;
         Sig("E8 ?? ?? ?? ?? 8B 0D ?? ?? ?? ?? 33 C0 A3", GAType::Data, -4, Lambda::DereferenceAddress) > rgp;
 
         Sig("83 C4 2C 5D 5B 59", GAType::Code, -5) > CG_DrawPlayerLowHealthOverlay;

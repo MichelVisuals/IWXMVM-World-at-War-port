@@ -269,4 +269,17 @@ namespace IWXMVM::Signatures
             return _address;
         }
     };
+
+    // Hardcoded-address alternative to Signature. Returns a fixed address with
+    // no scan. Use when a function/global has been confirmed by external
+    // reverse engineering (e.g. cross-referenced against t4-rtx or Ghidra).
+    // API-compatible with Signature so the same translation-table struct can
+    // hold either, and operator() returns uintptr_t.
+    template <std::uintptr_t address>
+    struct HardAddr
+    {
+        constexpr HardAddr() = default;
+        constexpr std::uintptr_t operator()() const { return address; }
+        constexpr std::uintptr_t GetAddress() const { return address; }
+    };
 }  // namespace IWXMVM::Signatures

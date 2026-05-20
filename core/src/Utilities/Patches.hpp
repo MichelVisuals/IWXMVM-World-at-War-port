@@ -64,9 +64,9 @@ namespace IWXMVM::Patches
         Patch(std::uintptr_t dst, std::array<std::uint8_t, length> bytes, PatchApplySetting setting = {})
             : _dst(reinterpret_cast<std::uint8_t*>(dst)), _src(bytes)
         {
-            assert(_dst != nullptr);
-
-            if (setting != PatchApplySetting::Deferred)
+            // Resilient: null dst means the signature didn't resolve. Skip silently —
+            // Apply()/Revert() also guard against null so the patch is just inert.
+            if (_dst != nullptr && setting != PatchApplySetting::Deferred)
                 Apply();
         }
 
@@ -82,6 +82,7 @@ namespace IWXMVM::Patches
 
         void Apply()
         {
+            if (_dst == nullptr) return;  // resilient: skip unresolved patch
             if (!_active)
             {
                 DWORD oldProtection;
@@ -97,6 +98,7 @@ namespace IWXMVM::Patches
 
         void Revert()
         {
+            if (_dst == nullptr) return;  // resilient: skip unresolved patch
             if (_active)
             {
                 DWORD oldProtection;
