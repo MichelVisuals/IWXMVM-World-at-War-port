@@ -7,6 +7,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "core", "core\core.vcxproj",
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "iw3", "iw3\iw3.vcxproj", "{A7A27C0B-43CE-4250-82FC-46F8B33DD98E}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "t4", "t4\t4.vcxproj", "{6CDE6327-6600-4917-81AF-3BA77F66AFC1}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x86 = Debug|x86
@@ -21,6 +23,10 @@ Global
 		{A7A27C0B-43CE-4250-82FC-46F8B33DD98E}.Debug|x86.Build.0 = Debug|Win32
 		{A7A27C0B-43CE-4250-82FC-46F8B33DD98E}.Release|x86.ActiveCfg = Release|Win32
 		{A7A27C0B-43CE-4250-82FC-46F8B33DD98E}.Release|x86.Build.0 = Release|Win32
+		{6CDE6327-6600-4917-81AF-3BA77F66AFC1}.Debug|x86.ActiveCfg = Debug|Win32
+		{6CDE6327-6600-4917-81AF-3BA77F66AFC1}.Debug|x86.Build.0 = Debug|Win32
+		{6CDE6327-6600-4917-81AF-3BA77F66AFC1}.Release|x86.ActiveCfg = Release|Win32
+		{6CDE6327-6600-4917-81AF-3BA77F66AFC1}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
