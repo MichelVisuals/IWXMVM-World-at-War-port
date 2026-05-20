@@ -208,31 +208,35 @@ namespace IWXMVM::Signatures
         {
             const std::uintptr_t address = SignatureScanner(*this, moduleHandles);
 
+            // Resilient mode: return 0 on miss instead of throwing, so a single
+            // bad signature doesn't kill init. Logs a warning instead.
             if (address == 0)
-                throw std::runtime_error(std::format("Failed to find signature:\n\t {}", _string.data()));
+            {
+                LOG_WARN("Signature scan failed (continuing): {}", _string.data());
+                return std::uintptr_t{0};
+            }
+
+            if constexpr (requires { std::declval<Callable>()(address); })
+            {
+                try
+                {
+                    const std::uintptr_t newAddress = _callable(address);
+                    if (newAddress == 0)
+                    {
+                        LOG_WARN("Signature post-process returned 0: {}", _string.data());
+                        return std::uintptr_t{0};
+                    }
+                    return newAddress;
+                }
+                catch (...)
+                {
+                    LOG_WARN("Signature post-process threw: {}", _string.data());
+                    return std::uintptr_t{0};
+                }
+            }
             else
             {
-                if constexpr (requires { std::declval<Callable>()(address); })
-                {
-                    try
-                    {
-                        const std::uintptr_t newAddress = _callable(address);
-                        if (newAddress == 0)
-                            throw std::runtime_error(std::format(
-                                "Failed to find correct game address (1), signature:\n\t {}", _string.data()));
-
-                        return newAddress;
-                    }
-                    catch (...)
-                    {
-                        throw std::runtime_error(
-                            std::format("Failed to find correct game address (2), signature:\n\t {}", _string.data()));
-                    }
-
-                    return std::uintptr_t{};
-                }
-                else
-                    return address;
+                return address;
             }
         }
 
@@ -246,23 +250,10 @@ namespace IWXMVM::Signatures
     template <auto intSignature, Types::ModuleType type = Types::ModuleType::BaseModule>
     struct Signature
     {
-        Signature()
+        constexpr Signature()
         {
             if (const auto modules = Mod::GetGameInterface()->GetModuleHandles(type); modules.has_value())
-            {
-                try
-                {
-                    _address = _signature.Scan(modules.value());
-                }
-                catch (const std::exception& ex)
-                {
-                    // Resilient mode: log and continue so partial sig coverage doesn't kill init.
-                    // Callers of GetAddress() get 0 for unresolved sigs; their hooks/calls will no-op
-                    // or fail at use-time, but the rest of init proceeds.
-                    LOG_WARN("Signature scan failed (continuing): {}", ex.what());
-                    _address = 0;
-                }
-            }
+                _address = _signature.Scan(modules.value());
         }
 
         static constexpr auto _signature = intSignature;
