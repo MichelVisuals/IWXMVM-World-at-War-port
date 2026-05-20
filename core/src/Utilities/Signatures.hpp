@@ -157,6 +157,14 @@ namespace IWXMVM::Signatures
 
     inline std::uintptr_t SignatureScanner(const auto& signature, const auto& moduleHandles)
     {
+        // CoDWaWmp.exe has a huge virtual .data section with many uncommitted /
+        // PAGE_NOACCESS pages. Reading those triggers an access violation that
+        // takes down init. Use VirtualQuery to walk only committed readable
+        // regions.
+        constexpr DWORD READABLE =
+            PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
         for (const auto handle : moduleHandles)
         {
             MODULEINFO process{};
@@ -165,21 +173,49 @@ namespace IWXMVM::Signatures
                 !process.lpBaseOfDll)
                 return 0;
 
-            const std::uintptr_t endOfDll = reinterpret_cast<std::uintptr_t>(process.lpBaseOfDll) + process.SizeOfImage;
+            const std::uintptr_t imageBase = reinterpret_cast<std::uintptr_t>(process.lpBaseOfDll);
+            const std::uintptr_t endOfDll = imageBase + process.SizeOfImage;
+            const std::size_t sigLen = signature._bytes.size();
 
-            for (std::uintptr_t i = reinterpret_cast<std::uintptr_t>(process.lpBaseOfDll); i < endOfDll; ++i)
+            std::uintptr_t i = imageBase;
+            while (i < endOfDll)
             {
-                std::size_t j = signature._frontMaskCount;
+                MEMORY_BASIC_INFORMATION mbi{};
+                if (::VirtualQuery(reinterpret_cast<LPCVOID>(i), &mbi, sizeof(mbi)) == 0)
+                    break;
 
-                for (; j < signature._bytes.size(); ++j)
+                const std::uintptr_t regionStart = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+                const std::uintptr_t regionEnd = regionStart + mbi.RegionSize;
+
+                const bool readable = (mbi.State == MEM_COMMIT) && ((mbi.Protect & READABLE) != 0) &&
+                                      ((mbi.Protect & PAGE_GUARD) == 0);
+
+                if (!readable)
                 {
-                    if (signature._bytes[j] != maskValue &&
-                        signature._bytes[j] != *reinterpret_cast<std::uint8_t*>(i + j))
-                        break;
+                    i = regionEnd;
+                    continue;
                 }
 
-                if (j == signature._bytes.size())
-                    return i + signature._offset;
+                // Scan within this committed readable region. Stop early enough that
+                // a full sigLen-byte read stays within the region (the next region
+                // boundary may be unreadable).
+                const std::uintptr_t scanEnd = (regionEnd > sigLen) ? (regionEnd - sigLen) : 0;
+                const std::uintptr_t scanLimit = (scanEnd < endOfDll) ? scanEnd : endOfDll;
+                for (; i <= scanLimit; ++i)
+                {
+                    std::size_t j = signature._frontMaskCount;
+                    for (; j < sigLen; ++j)
+                    {
+                        if (signature._bytes[j] != maskValue &&
+                            signature._bytes[j] != *reinterpret_cast<std::uint8_t*>(i + j))
+                            break;
+                    }
+                    if (j == sigLen)
+                        return i + signature._offset;
+                }
+                // Move past the region we just scanned (overlap into the next region
+                // is handled by the loop body re-querying).
+                i = regionEnd;
             }
         }
 
