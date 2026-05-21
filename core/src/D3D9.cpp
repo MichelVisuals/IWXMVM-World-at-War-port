@@ -161,6 +161,13 @@ namespace IWXMVM::D3D9
 
     bool capturedAlready = false;
     std::size_t reshadeEndSceneCallCount;
+    // T4 port: gate ImGui rendering to once per frame. WaW calls EndScene
+    // multiple times per frame (typically 3D scene + 2D HUD), and rendering
+    // IWXMVM on every call meant the 2nd call's CaptureBackBuffer captured
+    // the 1st call's IWXMVM overlay -> user saw IWXMVM UI inside the
+    // captured GameView image. This flag is set on the first EndScene of a
+    // frame and reset in SwapChainPresent_Hook below.
+    bool imguiRenderedThisFrame = false;
     HRESULT __stdcall EndScene_Hook(IDirect3DDevice9* pDevice)
     {
         // T4 port diagnostic: init + CheckForOverlays + RunImGuiFrame.
@@ -181,7 +188,11 @@ namespace IWXMVM::D3D9
             return EndScene(pDevice);
         }
 
-        UI::UIManager::Get().RunImGuiFrame();
+        if (!imguiRenderedThisFrame)
+        {
+            imguiRenderedThisFrame = true;
+            UI::UIManager::Get().RunImGuiFrame();
+        }
 
         return EndScene(pDevice);
 
@@ -330,6 +341,9 @@ namespace IWXMVM::D3D9
                                    HWND hDestWindowOverride, const RGNDATA* pDirtyRegion, DWORD dwFlags)
     {
         reshadeEndSceneCallCount = 0;
+        // T4 port: SwapChainPresent fires exactly once per frame, so reset
+        // the per-frame ImGui-render gate here. See EndScene_Hook for why.
+        imguiRenderedThisFrame = false;
         return SwapChainPresent(pDevice, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
 
     }

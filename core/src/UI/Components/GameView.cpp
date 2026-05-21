@@ -401,7 +401,23 @@ namespace IWXMVM::UI
         auto viewportSize = ImGui::GetContentRegionMax();
         viewportSize.y -= topBarHeight;
 
-        auto newTextureSize = ClampImage(viewportSize);
+        // T4 port: always show the GameView in a 16:9 box, regardless of
+        // WaW's native render aspect ratio. Crop whichever dimension is too
+        // large (so the box never overflows the IWXMVM frame), then make
+        // the texture exactly fill the box. The StretchRect inside
+        // CaptureBackBuffer + ImGui::Image will rescale the captured
+        // backbuffer to fit. If WaW runs at 21:9 (ultrawide), content is
+        // squashed slightly until we add a forced render-aspect dvar or
+        // projection override (see project-iwxmvm-recording-aspect memory).
+        // The original ClampImage() variant — which letterboxed the
+        // texture to the game's native aspect — is intentionally NOT used.
+        constexpr float TARGET_ASPECT = 16.0f / 9.0f;
+        if (viewportSize.x / viewportSize.y > TARGET_ASPECT)
+            viewportSize.x = viewportSize.y * TARGET_ASPECT;
+        else
+            viewportSize.y = viewportSize.x / TARGET_ASPECT;
+
+        auto newTextureSize = viewportSize;
         if (textureSize.x != newTextureSize.x || textureSize.y != newTextureSize.y)
         {
             static bool dbg_logged_create = false;

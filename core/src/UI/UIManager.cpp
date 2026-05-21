@@ -68,11 +68,16 @@ namespace IWXMVM::UI
                 // Defensive LOG_DEBUGs are gated inside GameView::Render to
                 // pinpoint the actual failure if one occurs.
                 GetUIComponent(Component::GameView)->Render();
-                // GetUIComponent(Component::PrimaryTabs)->Render();
-                // GetUIComponent(Component::ControlBar)->Render();
+                // T4 port: PrimaryTabs/ControlBar/PlayerAnimation re-enabled
+                // experimentally now that FindDvar works. If any throws, the
+                // outer catch will silence the whole frame — comment back out
+                // and use the staged LOG_DEBUG pattern (see GameView::Render)
+                // to bisect.
+                GetUIComponent(Component::PrimaryTabs)->Render();
+                GetUIComponent(Component::ControlBar)->Render();
                 GetUIComponent(Component::ControlsMenu)->Render();
                 GetUIComponent(Component::Preferences)->Render();
-                // GetUIComponent(Component::PlayerAnimation)->Render();
+                GetUIComponent(Component::PlayerAnimation)->Render();
                 GetUIComponent(Component::Credits)->Render();
             }
 
@@ -146,9 +151,28 @@ namespace IWXMVM::UI
         }
     }
 
+    // T4 port: INSERT key toggles whether IWXMVM "owns" mouse/keyboard input
+    // versus letting it pass through to WaW. When iwxmvmInputCaptured is
+    // false (default), the game still gets input even with the overlay
+    // visible — so the WaW main menu cursor moves with your mouse. Toggle
+    // on to interact with the IWXMVM UI without affecting the in-game
+    // cursor. This is a WndProc-level substitute for the IN_Frame engine
+    // patch (still HardAddr<0> for T4); will need to be revisited for
+    // demo-playback raw-mouse-delta which doesn't flow through WM_*.
+    static bool iwxmvmInputCaptured = false;
+
     HRESULT ImGuiWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         auto& uiManager = UIManager::Get();
+
+        // Handle the toggle BEFORE the suppression check so it always works.
+        if (uMsg == WM_KEYDOWN && wParam == VK_INSERT)
+        {
+            iwxmvmInputCaptured = !iwxmvmInputCaptured;
+            LOG_DEBUG("IWXMVM input captured: {} (Insert pressed)", iwxmvmInputCaptured);
+            return 0;
+        }
+
         auto& gameView = uiManager.GetUIComponent(UI::Component::GameView);
         if (gameView->HasFocus() && uiManager.IsControllableCameraModeSelected())
         {
@@ -161,9 +185,25 @@ namespace IWXMVM::UI
             ShowCursor(TRUE);
         }
 
+        // Always feed input to ImGui so the overlay can react regardless of
+        // capture mode.
         if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
         {
             return true;
+        }
+
+        // When IWXMVM owns input, swallow mouse + keyboard messages so they
+        // don't reach the game's WndProc.
+        if (iwxmvmInputCaptured)
+        {
+            const bool isMouseMsg = (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST);
+            const bool isKeyboardMsg = (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP ||
+                                        uMsg == WM_SYSKEYDOWN || uMsg == WM_SYSKEYUP ||
+                                        uMsg == WM_CHAR);
+            const bool isRawInput = (uMsg == WM_INPUT);
+            const bool isCursorMsg = (uMsg == WM_SETCURSOR);
+            if (isMouseMsg || isKeyboardMsg || isRawInput || isCursorMsg)
+                return 0;
         }
 
         return CallWindowProc(uiManager.GetOriginalGameWndProc(), hWnd, uMsg, wParam, lParam);
