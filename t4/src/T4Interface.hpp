@@ -202,7 +202,7 @@ namespace IWXMVM::T4
                                 : demoInfo.name;
 
             std::string str = static_cast<std::string>(Structures::GetClientStatic()->servername);
-            str += (str.ends_with(".dm_NA")) ? "" : ".dm_NA";
+            str += (str.ends_with(".dm_6")) ? "" : ".dm_6";
             demoInfo.path = Functions::GetFilePath(std::move(str));
 
             auto [demoStartTick, demoEndTick] = DemoParser::GetDemoTickRange();
@@ -219,15 +219,30 @@ namespace IWXMVM::T4
 
         std::string_view GetDemoExtension() final
         {
-            return {".dm_NA"};
+            return {".dm_6"};
         }
 
         void PlayDemo(std::filesystem::path demoPath) final
         {
             Events::Invoke(EventType::PreDemoLoad);
-            
+
+            // T4 port: WaW always reads demos from
+            // %LocalAppData%\Activision\CoDWaW\demos\, regardless of how
+            // Steam configures fs_homepath. On a Steam install the
+            // fs_homepath dvar is rewritten to the Steam game directory
+            // (e.g. D:\SteamLibrary\...\Call of Duty World at War\) so we
+            // can't trust it as a demo-write target. Use the Windows
+            // LOCALAPPDATA env var which is what WaW actually consults
+            // internally for its profile/demos folder.
+            char localAppData[MAX_PATH];
+            DWORD ladLen = ::GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+            if (ladLen == 0 || ladLen >= MAX_PATH)
+            {
+                LOG_ERROR("PlayDemo: LOCALAPPDATA env var not resolvable (len={})", ladLen);
+                return;
+            }
             const auto demoDirectory =
-                std::filesystem::path(GetDvar("fs_basepath")->value->string) / "players" / "demos";
+                std::filesystem::path(localAppData) / "Activision" / "CoDWaW" / "demos";
 
             try
             {
@@ -236,18 +251,39 @@ namespace IWXMVM::T4
                 if (!std::filesystem::exists(demoPath) || !std::filesystem::is_regular_file(demoPath))
                     return;
 
-                const auto tempDemoDirectory = demoDirectory / DEMO_TEMP_DIRECTORY;
-                if (!std::filesystem::exists(tempDemoDirectory))
-                    std::filesystem::create_directories(tempDemoDirectory);
+                if (!std::filesystem::exists(demoDirectory))
+                    std::filesystem::create_directories(demoDirectory);
 
-                const auto targetPath = tempDemoDirectory / demoPath.filename();
-                if (std::filesystem::exists(targetPath) && std::filesystem::is_regular_file(targetPath))
-                    std::filesystem::remove(targetPath);
+                // WaW's `demo` command does NOT support subdirectories — even
+                // when the file is at <homepath>/demos/IWXTMP/<name>.dm_6 the
+                // game's filesystem reports "demos/IWXTMP/<name>.dm_6 not
+                // found". So we flatten: if the demo already lives in the
+                // standard demos dir, play it in place; otherwise copy it
+                // there with its original filename and play that.
+                //
+                // TODO (rewinding): when rewinding lands, copy with an
+                // iwxmvm_ prefix to avoid shadowing user recordings.
+                std::filesystem::path resolvedPath = demoPath;
+                const bool alreadyInDemos =
+                    std::filesystem::equivalent(demoPath.parent_path(), demoDirectory);
+                if (!alreadyInDemos)
+                {
+                    resolvedPath = demoDirectory / demoPath.filename();
+                    if (std::filesystem::exists(resolvedPath) && std::filesystem::is_regular_file(resolvedPath))
+                        std::filesystem::remove(resolvedPath);
+                    std::filesystem::copy(demoPath, resolvedPath);
+                    LOG_DEBUG("PlayDemo: copied to {0}", resolvedPath.string());
+                }
+                else
+                {
+                    LOG_DEBUG("PlayDemo: source already in demos dir, skipping copy");
+                }
 
-                std::filesystem::copy(demoPath, targetPath);
-
-                Functions::Cbuf_AddText(
-                    std::format(R"(demo "{0}/{1}")", DEMO_TEMP_DIRECTORY, targetPath.filename().string()));
+                // WaW expects the demo name WITHOUT extension — it appends
+                // .dm_<protocol> itself.
+                const auto demoArg = resolvedPath.stem().string();
+                LOG_DEBUG("PlayDemo: issuing `demo \"{0}\"`", demoArg);
+                Functions::Cbuf_AddText(std::format(R"(demo "{0}")", demoArg));
             }
             catch (std::filesystem::filesystem_error& e)
             {
