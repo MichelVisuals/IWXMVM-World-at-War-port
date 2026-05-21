@@ -124,6 +124,19 @@ namespace IWXMVM::UI
             showDebugPanel = !showDebugPanel;
         }
 
+        // T4 port: WndProc-level input-ownership toggle. When true, WaW does
+        // not receive mouse/keyboard messages while the overlay is visible.
+        // Long-term this should be replaced by the IN_Frame engine patch
+        // once that address is wired (see [[project-iwxmvm-waw-port]]).
+        bool IsInputCaptured() const
+        {
+            return inputCaptured;
+        }
+        void ToggleInputCaptured()
+        {
+            inputCaptured = !inputCaptured;
+        }
+
         ImFont* GetBoldFont()
 		{
 			return ImGui::GetIO().Fonts->Fonts[1];
@@ -150,6 +163,7 @@ namespace IWXMVM::UI
         bool hideOverlay = false;
         bool showImGuiDemo = false;
         bool showDebugPanel = false;
+        bool inputCaptured = false;
 
         WNDPROC originalGameWndProc = nullptr;
     };

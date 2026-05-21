@@ -26,6 +26,37 @@ namespace IWXMVM::D3D9
     typedef HRESULT(__stdcall* EndScene_t)(IDirect3DDevice9* pDevice);
     EndScene_t EndScene;
     EndScene_t ReshadeOriginalEndScene;
+
+    // T4 port: hook GetCursorPos so the game receives a frozen cursor
+    // position whenever IWXMVM owns input. WaW's main-menu cursor follows
+    // GetCursorPos polling rather than WM_MOUSEMOVE, so the WndProc-level
+    // suppression in UIManager::ImGuiWndProc isn't enough on its own.
+    typedef BOOL(WINAPI* GetCursorPos_t)(LPPOINT);
+    GetCursorPos_t OriginalGetCursorPos = nullptr;
+    POINT frozenCursorPos = {0, 0};
+    BOOL WINAPI GetCursorPos_Hook(LPPOINT lpPoint)
+    {
+        if (!lpPoint || !OriginalGetCursorPos)
+            return OriginalGetCursorPos ? OriginalGetCursorPos(lpPoint) : FALSE;
+
+        const BOOL result = OriginalGetCursorPos(lpPoint);
+        if (!result)
+            return FALSE;
+
+        if (UI::UIManager::Get().IsInputCaptured())
+        {
+            // Return the position last seen before capture turned on so the
+            // game thinks the cursor is stationary.
+            *lpPoint = frozenCursorPos;
+        }
+        else
+        {
+            // Cache the live position so we have something fresh to freeze
+            // the next time capture toggles on.
+            frozenCursorPos = *lpPoint;
+        }
+        return TRUE;
+    }
     typedef HRESULT(__stdcall* Reset_t)(IDirect3DDevice9* pDevice, D3DPRESENT_PARAMETERS* pPresentationParameters);
     Reset_t Reset;
     typedef HRESULT(__stdcall* Present_t)(IDirect3DDevice9* pDevice, const RECT* pSourceRect, const RECT* pDestRect,
@@ -500,6 +531,20 @@ namespace IWXMVM::D3D9
             HookManager::CreateHook((std::uintptr_t)reshadeEndSceneAddress.value(),
                                     (std::uintptr_t)ReshadeOriginalEndScene_Hook,
                                     (std::uintptr_t*)&ReshadeOriginalEndScene);
+        }
+
+        // T4 port: hook user32!GetCursorPos so the game polls a frozen value
+        // while IWXMVM has input capture. See GetCursorPos_Hook above.
+        if (auto getCursorPosAddr = GetProcAddress(GetModuleHandleA("user32.dll"), "GetCursorPos"))
+        {
+            HookManager::CreateHook((std::uintptr_t)getCursorPosAddr,
+                                    (std::uintptr_t)GetCursorPos_Hook,
+                                    (std::uintptr_t*)&OriginalGetCursorPos);
+            LOG_DEBUG("Hooked user32!GetCursorPos at {:p}", (void*)getCursorPosAddr);
+        }
+        else
+        {
+            LOG_WARN("Failed to resolve user32!GetCursorPos — input freeze will not work");
         }
     }
 

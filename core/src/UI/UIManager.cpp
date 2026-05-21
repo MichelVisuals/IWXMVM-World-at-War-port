@@ -151,25 +151,17 @@ namespace IWXMVM::UI
         }
     }
 
-    // T4 port: INSERT key toggles whether IWXMVM "owns" mouse/keyboard input
-    // versus letting it pass through to WaW. When iwxmvmInputCaptured is
-    // false (default), the game still gets input even with the overlay
-    // visible — so the WaW main menu cursor moves with your mouse. Toggle
-    // on to interact with the IWXMVM UI without affecting the in-game
-    // cursor. This is a WndProc-level substitute for the IN_Frame engine
-    // patch (still HardAddr<0> for T4); will need to be revisited for
-    // demo-playback raw-mouse-delta which doesn't flow through WM_*.
-    static bool iwxmvmInputCaptured = false;
-
     HRESULT ImGuiWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         auto& uiManager = UIManager::Get();
 
-        // Handle the toggle BEFORE the suppression check so it always works.
+        // Insert key is a convenience hotkey for the same toggle exposed in
+        // the menu bar. Handled BEFORE the suppression check so it can
+        // always turn capture OFF.
         if (uMsg == WM_KEYDOWN && wParam == VK_INSERT)
         {
-            iwxmvmInputCaptured = !iwxmvmInputCaptured;
-            LOG_DEBUG("IWXMVM input captured: {} (Insert pressed)", iwxmvmInputCaptured);
+            uiManager.ToggleInputCaptured();
+            LOG_DEBUG("IWXMVM input captured: {} (Insert pressed)", uiManager.IsInputCaptured());
             return 0;
         }
 
@@ -193,8 +185,9 @@ namespace IWXMVM::UI
         }
 
         // When IWXMVM owns input, swallow mouse + keyboard messages so they
-        // don't reach the game's WndProc.
-        if (iwxmvmInputCaptured)
+        // don't reach the game's WndProc. WndProc-level substitute for the
+        // IN_Frame engine patch (still HardAddr<0> for T4).
+        if (uiManager.IsInputCaptured())
         {
             const bool isMouseMsg = (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST);
             const bool isKeyboardMsg = (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP ||
