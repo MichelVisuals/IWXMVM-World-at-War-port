@@ -56,29 +56,45 @@ namespace IWXMVM::UI
 
             if (!hideOverlay)
             {
-                // All IWXMVM components re-enabled. If any throws, the outer
-                // catch handler logs once and the game stays alive (the
-                // overlay just won't draw that frame fully).
-                GetUIComponent(Component::Background)->Render();
-                GetUIComponent(Component::MenuBar)->Render();
-                // GameView re-enabled for T4 diagnostic. Previous note claimed
-                // refdef_s dependency, but with GetGameState() stubbed to
-                // MainMenu, Render()'s only engine touchpoints are
-                // CaptureBackBuffer + an Events listener that's pure ImGui.
-                // Defensive LOG_DEBUGs are gated inside GameView::Render to
-                // pinpoint the actual failure if one occurs.
-                GetUIComponent(Component::GameView)->Render();
-                // T4 port: PrimaryTabs/ControlBar/PlayerAnimation re-enabled
-                // experimentally now that FindDvar works. If any throws, the
-                // outer catch will silence the whole frame — comment back out
-                // and use the staged LOG_DEBUG pattern (see GameView::Render)
-                // to bisect.
-                GetUIComponent(Component::PrimaryTabs)->Render();
-                GetUIComponent(Component::ControlBar)->Render();
-                GetUIComponent(Component::ControlsMenu)->Render();
-                GetUIComponent(Component::Preferences)->Render();
-                GetUIComponent(Component::PlayerAnimation)->Render();
-                GetUIComponent(Component::Credits)->Render();
+                // T4 port: per-component try/catch so a throw in one component
+                // doesn't take down the entire overlay. The catch logs each
+                // component's failure once (on transition) so we can pinpoint
+                // which one tries to read unwired engine state in InDemo mode.
+#define RENDER_ONE(comp_enum, comp_name)                                                       \
+    do                                                                                          \
+    {                                                                                           \
+        static bool _logged_##comp_enum = false;                                                \
+        try                                                                                     \
+        {                                                                                       \
+            GetUIComponent(Component::comp_enum)->Render();                                     \
+        }                                                                                       \
+        catch (const std::exception& _e)                                                        \
+        {                                                                                       \
+            if (!_logged_##comp_enum)                                                           \
+            {                                                                                   \
+                _logged_##comp_enum = true;                                                     \
+                LOG_CRITICAL("Component '" comp_name "' threw std::exception: {} (further silenced)", _e.what()); \
+            }                                                                                   \
+        }                                                                                       \
+        catch (...)                                                                             \
+        {                                                                                       \
+            if (!_logged_##comp_enum)                                                           \
+            {                                                                                   \
+                _logged_##comp_enum = true;                                                     \
+                LOG_CRITICAL("Component '" comp_name "' threw non-std exception (further silenced)"); \
+            }                                                                                   \
+        }                                                                                       \
+    } while (0)
+                RENDER_ONE(Background, "Background");
+                RENDER_ONE(MenuBar, "MenuBar");
+                RENDER_ONE(GameView, "GameView");
+                RENDER_ONE(PrimaryTabs, "PrimaryTabs");
+                RENDER_ONE(ControlBar, "ControlBar");
+                RENDER_ONE(ControlsMenu, "ControlsMenu");
+                RENDER_ONE(Preferences, "Preferences");
+                RENDER_ONE(PlayerAnimation, "PlayerAnimation");
+                RENDER_ONE(Credits, "Credits");
+#undef RENDER_ONE
             }
 
             ImGui::EndFrame();

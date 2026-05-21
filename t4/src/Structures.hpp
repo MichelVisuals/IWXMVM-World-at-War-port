@@ -120,6 +120,11 @@ namespace IWXMVM::T4::Structures
         char serverCommands[128][1024];
         bool isServerRestarting;
         int lastClientArchiveIndex;
+        int _t4_pad_before_demoName;  // T4: demoName + downstream demo fields are
+                                       // shifted +4 bytes vs IW3. Empirically located
+                                       // by scanning clc memory for the loaded demo's
+                                       // basename and matching field-value patterns
+                                       // (demorecording=0, demoplaying=1, demofile=1).
         char demoName[64];
         int demorecording;
         int demoplaying;

@@ -57,6 +57,43 @@ namespace IWXMVM::D3D9
         }
         return TRUE;
     }
+
+    // T4 port: hook user32!SetCursorPos so WaW's IN_Frame cannot re-center
+    // the cursor every frame while IWXMVM has input capture. Without this,
+    // during demo playback (when state machine runs IN_Frame) the cursor
+    // jumps back to the game's center on every frame, making it impossible
+    // to click on the IWXMVM overlay panels.
+    typedef BOOL(WINAPI* SetCursorPos_t)(int, int);
+    SetCursorPos_t OriginalSetCursorPos = nullptr;
+    BOOL WINAPI SetCursorPos_Hook(int X, int Y)
+    {
+        // One-shot diagnostic: confirm the hook is actually being called and
+        // log whether we're suppressing or passing through. Helps debug the
+        // "cursor still locked" scenario.
+        static bool dbg_logged = false;
+        if (!dbg_logged)
+        {
+            dbg_logged = true;
+            LOG_DEBUG("SetCursorPos_Hook fired (first call): X={} Y={} captured={} inDemo={}",
+                      X, Y,
+                      UI::UIManager::Get().IsInputCaptured(),
+                      Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo);
+        }
+
+        // T4 port: suppress unconditionally while a demo is playing — the
+        // user expects to interact with IWXMVM panels during playback and
+        // there's no scenario where WaW needs to recenter the cursor in
+        // that state. (When the user wants to control freecam, IWXMVM's
+        // freecam camera takes over input via a different path that doesn't
+        // depend on SetCursorPos.)
+        if (UI::UIManager::Get().IsInputCaptured() ||
+            Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo)
+        {
+            return TRUE;
+        }
+        if (!OriginalSetCursorPos) return FALSE;
+        return OriginalSetCursorPos(X, Y);
+    }
     typedef HRESULT(__stdcall* Reset_t)(IDirect3DDevice9* pDevice, D3DPRESENT_PARAMETERS* pPresentationParameters);
     Reset_t Reset;
     typedef HRESULT(__stdcall* Present_t)(IDirect3DDevice9* pDevice, const RECT* pSourceRect, const RECT* pDestRect,
@@ -269,7 +306,30 @@ namespace IWXMVM::D3D9
 
         if (Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo)
         {
-            GFX::GraphicsManager::Get().Render();
+            // T4 port: GraphicsManager touches engine state (refdef_s, cg_s)
+            // we haven't wired yet. Catch + log once so it doesn't take down
+            // the d3d9 hook and leave the user staring at a fullscreen demo.
+            static bool gfx_failed_logged = false;
+            try
+            {
+                GFX::GraphicsManager::Get().Render();
+            }
+            catch (const std::exception& e)
+            {
+                if (!gfx_failed_logged)
+                {
+                    gfx_failed_logged = true;
+                    LOG_CRITICAL("GraphicsManager::Render threw std::exception: {} (further silenced)", e.what());
+                }
+            }
+            catch (...)
+            {
+                if (!gfx_failed_logged)
+                {
+                    gfx_failed_logged = true;
+                    LOG_CRITICAL("GraphicsManager::Render threw non-std exception (further silenced)");
+                }
+            }
         }
 
         // T4 port WIP: skip ImGui frame render in EndScene to diagnose whether
@@ -545,6 +605,20 @@ namespace IWXMVM::D3D9
         else
         {
             LOG_WARN("Failed to resolve user32!GetCursorPos — input freeze will not work");
+        }
+
+        // T4 port: hook SetCursorPos so WaW's IN_Frame re-centering is
+        // suppressed when IWXMVM owns input. See SetCursorPos_Hook above.
+        if (auto setCursorPosAddr = GetProcAddress(GetModuleHandleA("user32.dll"), "SetCursorPos"))
+        {
+            HookManager::CreateHook((std::uintptr_t)setCursorPosAddr,
+                                    (std::uintptr_t)SetCursorPos_Hook,
+                                    (std::uintptr_t*)&OriginalSetCursorPos);
+            LOG_DEBUG("Hooked user32!SetCursorPos at {:p}", (void*)setCursorPosAddr);
+        }
+        else
+        {
+            LOG_WARN("Failed to resolve user32!SetCursorPos — cursor recentering will not be suppressed");
         }
     }
 

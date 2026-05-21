@@ -82,6 +82,39 @@ namespace IWXMVM::T4
             // Re-enable each call as its dependencies are wired up.
             // Hooks::Install();
             // Patches::GetGamePatches();
+
+            // CL_KeyEvent demo-disconnect patch.
+            // T4 CL_KeyEvent at 0x004949D0 contains:
+            //   0x00494C86: 83 3D 28 15 BB 00 00   CMP [demoplaying], 0
+            //   0x00494C8D: 75 0A                  JNZ +0x0A -> 0x00494C99
+            //   0x00494C99..0x00494CBC: TEST ECX,ECX; if zero, fall into the
+            //     disconnect path (MOV ESI,...; MOV EAX,0x0083EB98; CALL).
+            //   0x00494CBE: 83 FD 1B               CMP EBP, 0x1B (ESC handling)
+            // Extending the JNZ at 0x00494C8D from +0x0A to +0x2F skips the
+            // entire disconnect block when demoplaying != 0, landing safely
+            // at the ESC-check (which then handles non-ESC keys via the
+            // function's normal continuation). Mirrors iw3 Patches.hpp:29
+            // (which uses +0x4E for IW3's specific code layout).
+            {
+                const std::uintptr_t patch_va = 0x00494C8E;  // displacement byte of JNZ
+                const std::uint8_t new_value = 0x2F;
+                DWORD oldProtect = 0;
+                if (::VirtualProtect(reinterpret_cast<void*>(patch_va), 1,
+                                     PAGE_EXECUTE_READWRITE, &oldProtect))
+                {
+                    const std::uint8_t prev = *reinterpret_cast<volatile std::uint8_t*>(patch_va);
+                    *reinterpret_cast<volatile std::uint8_t*>(patch_va) = new_value;
+                    DWORD tmp = 0;
+                    ::VirtualProtect(reinterpret_cast<void*>(patch_va), 1, oldProtect, &tmp);
+                    LOG_INFO("CL_KeyEvent demo-disconnect patch applied: [0x{:08X}] 0x{:02X} -> 0x{:02X}",
+                             patch_va, prev, new_value);
+                }
+                else
+                {
+                    LOG_ERROR("CL_KeyEvent demo-disconnect patch failed: VirtualProtect at 0x{:08X} returned 0",
+                              patch_va);
+                }
+            }
         }
 
         void DisableRawInput()
@@ -160,40 +193,14 @@ namespace IWXMVM::T4
 
         Types::GameState GetGameState() final
         {
-            // T4 port: real logic restored now that clientConnection is wired
-            // (0x00B71390). T4's clientConnection_t may have a different
-            // demoplaying offset than IW3 — if GetGameState never transitions
-            // to InDemo, search for the field by comparing memory before/after
-            // demo load (look for a dword that flips from 0 to nonzero).
             const auto addr = GetGameAddresses().clientConnection();
             if (!addr) return Types::GameState::MainMenu;
 
-            // cl_ingame dvar reflects whether we're in any active session.
-            // Now that FindDvar works, this gates MainMenu vs the rest.
             auto cl_ingame = Functions::FindDvar("cl_ingame");
             if (!cl_ingame || !cl_ingame->current.enabled)
                 return Types::GameState::MainMenu;
 
-            // T4 port diagnostic: log the first 32 dwords of clc once per
-            // session, plus every time GameState changes, so we can spot
-            // the demoplaying-offset shift if any. Keep low-frequency.
-            static int last_state = -1;
             const auto clc = Structures::GetClientConnection();
-            int cur_state;
-            if (clc->demoplaying)
-                cur_state = (int)Types::GameState::InDemo;
-            else
-                cur_state = (int)Types::GameState::InGame;
-            if (cur_state != last_state)
-            {
-                last_state = cur_state;
-                const auto p = reinterpret_cast<const std::uint32_t*>(clc);
-                std::string s;
-                for (int i = 0; i < 16; ++i) s += std::format("[{:02}]=0x{:08X} ", i, p[i]);
-                LOG_DEBUG("GameState transition: cl_ingame=1, demoplaying={}, clc dwords: {}",
-                          (int)clc->demoplaying, s);
-            }
-
             if (clc->demoplaying)
                 return Types::GameState::InDemo;
             return Types::GameState::InGame;
@@ -221,25 +228,22 @@ namespace IWXMVM::T4
 
         Types::DemoInfo demoInfo;
 
+        // T4 port WIP: PlayDemo stores the resolved demo path here so
+        // GetDemoInfo can return a safe answer without dereferencing
+        // clientStatic/clientActive (both still HardAddr<0>). Wiring those
+        // is a separate task — once done, restore the original GetDemoInfo
+        // body that reads servername + serverTime from engine state.
+        std::string lastDemoStem;
+        std::filesystem::path lastDemoPath;
+
         Types::DemoInfo GetDemoInfo() final
         {
-            demoInfo.name = Structures::GetClientStatic()->servername;
-            demoInfo.name = demoInfo.name.starts_with(DEMO_TEMP_DIRECTORY)
-                                ? demoInfo.name.substr(strlen(DEMO_TEMP_DIRECTORY) + 1)
-                                : demoInfo.name;
-
-            std::string str = static_cast<std::string>(Structures::GetClientStatic()->servername);
-            str += (str.ends_with(".dm_6")) ? "" : ".dm_6";
-            demoInfo.path = Functions::GetFilePath(std::move(str));
+            demoInfo.name = lastDemoStem;
+            demoInfo.path = lastDemoPath.string();
 
             auto [demoStartTick, demoEndTick] = DemoParser::GetDemoTickRange();
-
-            const auto serverTime = Structures::GetClientActive()->serverTime;
-            if (serverTime > demoStartTick && serverTime < demoEndTick && !Components::Rewinding::IsRewinding())
-            {
-                demoInfo.gameTick = serverTime - demoStartTick;
-            }
-            demoInfo.endTick = demoEndTick - demoStartTick;
+            demoInfo.gameTick = 0;
+            demoInfo.endTick = (demoEndTick > demoStartTick) ? (demoEndTick - demoStartTick) : 1;
 
             return demoInfo;
         }
@@ -309,6 +313,8 @@ namespace IWXMVM::T4
                 // WaW expects the demo name WITHOUT extension — it appends
                 // .dm_<protocol> itself.
                 const auto demoArg = resolvedPath.stem().string();
+                lastDemoStem = demoArg;
+                lastDemoPath = resolvedPath;
                 LOG_DEBUG("PlayDemo: issuing `demo \"{0}\"`", demoArg);
                 Functions::Cbuf_AddText(std::format(R"(demo "{0}")", demoArg));
             }
