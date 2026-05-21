@@ -9,4 +9,6 @@ namespace IWXMVM::T4::Hooks::Playback
     void Reset();
 
     extern std::atomic<std::int32_t> rewindTo;
+    extern volatile std::uint32_t g_sv_frame_hits;
+    extern volatile std::uint32_t g_sv_frame_last_msec;
 }

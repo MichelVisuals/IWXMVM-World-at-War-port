@@ -13,6 +13,7 @@
 #include "Addresses.hpp"
 #include "Patches.hpp"
 #include "Components/Rewinding.hpp"
+#include "Components/Playback.hpp"
 
 #include "glm/vec3.hpp"
 #include "glm/gtc/type_ptr.hpp"
@@ -82,6 +83,11 @@ namespace IWXMVM::T4
             // Re-enable each call as its dependencies are wired up.
             // Hooks::Install();
             // Patches::GetGamePatches();
+
+            // T4 port: enable just the SV_Frame pause hook now that SV_Frame's
+            // T4 address is wired (0x0057F7E5). Hooks::Playback::Install internally
+            // skips FS_Read hook when fsh is still HardAddr<0>, so this is safe.
+            Hooks::Playback::Install();
 
             // CL_KeyEvent demo-disconnect patch.
             // T4 CL_KeyEvent at 0x004949D0 contains:
@@ -155,13 +161,138 @@ namespace IWXMVM::T4
 
             Events::RegisterListener(EventType::OnCameraChanged, Hooks::Camera::OnCameraChanged);
 
-            Events::RegisterListener(EventType::PostDemoLoad, [&]() { 
-                Functions::FindDvar("sv_cheats")->current.enabled = true; 
+            Events::RegisterListener(EventType::PostDemoLoad, [&]() {
+                Functions::FindDvar("sv_cheats")->current.enabled = true;
                 DisableRawInput();
-                    
+
                 // ensure these are set to their defaults, so our killfeed toggle works properly
                 Functions::FindDvar("con_gamemsgwindow0msgtime")->current.value = 5;
                 Functions::FindDvar("con_gamemsgwindow0linecount")->current.integer = 4;
+            });
+
+            // T4 port hunt: two-pass scan for cls.realtime (engine ms since
+            // launch). Pass 1 records all small-positive uint32s. Pass 2
+            // checks 2 seconds later and reports values that advanced by
+            // ~1500-2500 ms. Filters out spikes/snapshots; clean signal for
+            // monotonic engine clocks. clientStatic_s.realtime is at offset
+            // 0x150 per T4SP-Server-Plugin asserts, so once we have the VA we
+            // derive the struct base. (Also exposes related clocks like
+            // cl.snap.serverTime, cgs.time, etc.)
+            Events::RegisterListener(EventType::OnFrame, [&]() {
+                constexpr int BUF_SIZE = 65536;
+                static RtPair* pass1_buf = nullptr;
+                static int pass1_count = 0;
+                static int phase = 0;  // 0=idle, 1=did pass1, 2=done
+                static int wait_counter = 0;
+
+                if (phase >= 2) return;
+                if (GetGameState() != Types::GameState::InDemo) return;
+
+                if (phase == 0)
+                {
+                    LOG_INFO("realtime-hunt pass 1: scanning BSS for engine-clock candidates");
+                    if (!pass1_buf)
+                        pass1_buf = new RtPair[BUF_SIZE];
+                    pass1_count = 0;
+
+                    std::uintptr_t addr = 0x01000000;
+                    while (addr < 0x05000000)
+                    {
+                        MEMORY_BASIC_INFORMATION mbi{};
+                        if (::VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0)
+                        {
+                            addr += 0x1000;
+                            continue;
+                        }
+                        const std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+                        if (mbi.State == MEM_COMMIT &&
+                            (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0 &&
+                            (mbi.Protect & PAGE_GUARD) == 0)
+                        {
+                            const std::uintptr_t scan_end = std::min(region_end, (std::uintptr_t)0x05000000);
+                            RealtimeScanRegionSEH((std::uintptr_t)mbi.BaseAddress, scan_end,
+                                                   pass1_buf, BUF_SIZE, pass1_count);
+                        }
+                        addr = region_end > addr ? region_end : addr + 0x1000;
+                    }
+                    LOG_INFO("realtime-hunt pass 1: captured {} candidates; sleeping ~2s for pass 2",
+                             pass1_count);
+                    phase = 1;
+                    wait_counter = 0;
+                }
+                else if (phase == 1)
+                {
+                    ++wait_counter;
+                    if (wait_counter < 600) return;  // ~5s @ 120fps, ~10s @ 60fps
+
+                    LOG_INFO("realtime-hunt pass 2: checking advancement after {} frames", wait_counter);
+                    int reported = 0;
+                    // First, count by delta bucket to see the distribution
+                    int bucket_negative = 0, bucket_0_100 = 0, bucket_100_1000 = 0,
+                        bucket_1000_5000 = 0, bucket_5000_20000 = 0, bucket_huge = 0;
+                    for (int i = 0; i < pass1_count; ++i)
+                    {
+                        std::uint32_t new_val = 0;
+                        if (RealtimeReadSEH(pass1_buf[i].va, new_val) != 0) continue;
+                        if (new_val < pass1_buf[i].value) { ++bucket_negative; continue; }
+                        const std::uint32_t delta = new_val - pass1_buf[i].value;
+                        if      (delta < 100)    ++bucket_0_100;
+                        else if (delta < 1000)   ++bucket_100_1000;
+                        else if (delta < 5000)   ++bucket_1000_5000;
+                        else if (delta < 20000)  ++bucket_5000_20000;
+                        else                     ++bucket_huge;
+
+                        // Report candidates whose delta is in 1000-20000 range
+                        // (typical engine ms clock advancement for our wait period
+                        // depending on fps and timescale).
+                        if (delta >= 1000 && delta <= 20000 && reported < 80)
+                        {
+                            LOG_INFO("  cls.realtime cand @ 0x{:08X}: {} -> {} (delta={}, cls_base candidate=0x{:08X})",
+                                     pass1_buf[i].va, pass1_buf[i].value, new_val,
+                                     delta, pass1_buf[i].va - 0x150);
+                            ++reported;
+                        }
+                    }
+                    LOG_INFO("realtime-hunt deltas: <0:{}, 0-100:{}, 100-1K:{}, 1K-5K:{}, 5K-20K:{}, >20K:{}",
+                             bucket_negative, bucket_0_100, bucket_100_1000,
+                             bucket_1000_5000, bucket_5000_20000, bucket_huge);
+                    LOG_INFO("realtime-hunt: reported {} candidates", reported);
+                    delete[] pass1_buf;
+                    pass1_buf = nullptr;
+                    pass1_count = 0;
+                    phase = 2;
+                }
+            });
+
+            // T4 port: pause via timescale=0. Engine clamps to 0.001x which
+            // is effectively frozen for camera composition (a 74-sec demo
+            // plays in 20+ hours at that rate). Not TRUE freeze — true pause
+            // would need SV_Frame hook (T4 addr not yet located; needs
+            // leaked-source or Ghidra session). Earlier NOP-write attempts
+            // accelerated the demo because the addresses we found were
+            // "previous realtime" buffers — see git log e71155d..bf8ac48.
+            Events::RegisterListener(EventType::OnFrame, [&]() {
+                static bool wasPaused = false;
+                static float savedTimescale = 1.0f;
+                if (GetGameState() != Types::GameState::InDemo)
+                {
+                    wasPaused = false;
+                    return;
+                }
+                const bool isPaused = IWXMVM::Components::Playback::IsPaused();
+                if (isPaused == wasPaused) return;
+                wasPaused = isPaused;
+                auto* ts = Functions::FindDvar("timescale");
+                if (!ts) return;
+                if (isPaused)
+                {
+                    if (ts->current.value > 0.0f) savedTimescale = ts->current.value;
+                    ts->current.value = 0.0f;
+                }
+                else
+                {
+                    ts->current.value = savedTimescale;
+                }
             });
         }
 
@@ -189,6 +320,40 @@ namespace IWXMVM::T4
                 Patches::GetGamePatches().IN_Frame.Apply();
             else 
                 Patches::GetGamePatches().IN_Frame.Revert();
+        }
+
+        struct RtPair { std::uint32_t va; std::uint32_t value; };
+
+        // SEH-only POD helper for pass-1 scan (no C++ objects so __try works).
+        // Caller pre-allocates buffer + passes capacity.
+        static int RealtimeScanRegionSEH(std::uintptr_t region_base, std::uintptr_t region_end,
+                                         RtPair* buf, int buf_size, int& cursor)
+        {
+            __try
+            {
+                for (std::uintptr_t va = region_base; va + 4 <= region_end && cursor < buf_size; va += 4)
+                {
+                    const std::uint32_t v = *reinterpret_cast<const std::uint32_t*>(va);
+                    if (v >= 5000 && v <= 10'000'000)
+                    {
+                        buf[cursor].va = (std::uint32_t)va;
+                        buf[cursor].value = v;
+                        ++cursor;
+                    }
+                }
+                return 0;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                return 1;
+            }
+        }
+
+        // SEH-only POD helper for pass-2 single-value read.
+        static int RealtimeReadSEH(std::uintptr_t va, std::uint32_t& out)
+        {
+            __try { out = *reinterpret_cast<const std::uint32_t*>(va); return 0; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
         }
 
         // One-shot live-process diagnostic: hunt clientActive_s base via

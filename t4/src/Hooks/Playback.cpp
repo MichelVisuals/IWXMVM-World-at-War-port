@@ -12,43 +12,40 @@
 
 namespace IWXMVM::T4::Hooks::Playback
 {
+    volatile std::uint32_t g_sv_frame_hits = 0;
+    volatile std::uint32_t g_sv_frame_last_msec = 0;
+
     void SV_Frame_Internal(std::int32_t& msec)
     {
+        g_sv_frame_hits++;
+        g_sv_frame_last_msec = (std::uint32_t)msec;
         msec = Components::Playback::CalculatePlaybackDelta(msec);
     }
 
+    // T4 port: simplified single-branch SV_Frame hook. The verified T4 function
+    // at 0x0057F7E5 takes msec in ESI and returns it via EAX (PUSH ESI; CALL
+    // inner; ADD ESP, 4; MOV EAX, ESI; POP ECX; RET). We replace the whole
+    // body: pull msec from ESI, run it through CalculatePlaybackDelta (returns
+    // 0 when paused, msec unchanged otherwise), return via EAX. The original
+    // function's inner-CALL side effects are skipped — matches IW3 behavior.
     void __declspec(naked) SV_Frame_Hook()
     {
         static std::int32_t msec;
-        static std::int32_t ebxValue;
 
         __asm
         {
             pop ecx
             pushad
             mov msec, esi
-            mov ebxValue, ebx
         }
 
-        if (ebxValue == *reinterpret_cast<std::int32_t*>(0x69136C))  // not true for CoD4X
+        SV_Frame_Internal(msec);
+
+        __asm
         {
-            SV_Frame_Internal(msec);
-            __asm
-            {
-                popad
-                mov eax, msec
-                ret
-            }
-        }
-        else
-        {
-            SV_Frame_Internal(msec);
-            __asm
-            {
-                popad
-                mov ebx, msec
-                ret
-            }
+            popad
+            mov eax, msec
+            ret
         }
     }
 
@@ -79,8 +76,16 @@ namespace IWXMVM::T4::Hooks::Playback
 
     void Install()
     {
-        HookManager::CreateHook(GetGameAddresses().SV_Frame(), (std::uintptr_t)SV_Frame_Hook, nullptr);
+        const auto sv_frame_va = GetGameAddresses().SV_Frame();
+        if (sv_frame_va)
+            HookManager::CreateHook(sv_frame_va, (std::uintptr_t)SV_Frame_Hook, nullptr);
 
-        HookManager::CreateHook(GetGameAddresses().FS_Read(), (std::uintptr_t)FS_Read_Hook, (uintptr_t*)&FS_Read_Trampoline);
+        // T4 port: FS_Read hook needs `fsh` global (clientStatic file-handle
+        // array) which is still HardAddr<0>. Without it, rewinding can't
+        // intercept demo-file reads. Skip until fsh is wired.
+        const auto fs_read_va = GetGameAddresses().FS_Read();
+        const auto fsh_va = GetGameAddresses().fsh();
+        if (fs_read_va && fsh_va)
+            HookManager::CreateHook(fs_read_va, (std::uintptr_t)FS_Read_Hook, (uintptr_t*)&FS_Read_Trampoline);
     }
 }  // namespace IWXMVM::T4::Hooks::Playback

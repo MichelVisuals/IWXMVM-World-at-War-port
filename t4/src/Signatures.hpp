@@ -50,6 +50,11 @@ namespace IWXMVM::T4::Signatures
         HAddr<0> CG_OffsetThirdPersonView;
         HAddr<0> FX_SetupCamera;
         HAddr<0> R_SetViewParmsForScene;
+        // SV_Frame in T4 MP not yet located. The IW3 sig matched once at
+        // 0x0057F7E1+4=0x0057F7E5, function shape looked right (PUSH ESI;
+        // CALL inner; ADD ESP, 4; MOV EAX, ESI; POP ECX; RET), BUT a hit
+        // counter on a hook at that address recorded 0 calls during 5+ sec of
+        // demo playback. Wrong function. Needs Ghidra to locate real SV_Frame.
         HAddr<0> SV_Frame;
         // 0x00B71390 — verified via IW3 sig-pattern match against our memory
         // dump (BA imm32 E8 rel32 80 3D imm32 00 at VA 0x00497C40). The

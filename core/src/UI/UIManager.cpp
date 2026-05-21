@@ -97,6 +97,13 @@ namespace IWXMVM::UI
 #undef RENDER_ONE
             }
 
+            // T4 port: invoke OnFrame after components render so per-frame
+            // listeners (CameraManager, CaptureManager, KeyframeManager,
+            // VisualsMenu, T4Interface pause-via-timescale, etc.) actually
+            // run. This was being skipped due to the early-return below,
+            // which is leftover diagnostic code from the T4 bisect.
+            Events::Invoke(EventType::OnFrame);
+
             ImGui::EndFrame();
             ImGui::Render();
             ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
