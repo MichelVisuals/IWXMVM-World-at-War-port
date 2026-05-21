@@ -1219,20 +1219,30 @@ namespace IWXMVM::T4::Structures
     };
 
     /* 758 */
+    // T4 (CoDWaWmp.exe) layout — verified against t4-rtx/src/game/structs.hpp
+    // (STATIC_ASSERT_SIZE 0x5C). Differs from IW3 in two ways:
+    //   1) 4-byte alignment pad inserted before `current` (current is at
+    //      offset 0x10 in T4 vs 0x0C in IW3).
+    //   2) Extra `saved` DvarValue between `reset` and `domain`.
+    //   3) No `domainFunc` field after `domain`.
+    // All downstream reads of dvar->current.{value,integer,enabled,...}
+    // were silently returning garbage from the pad bytes prior to this fix.
     struct dvar_s
     {
-        const char* name;
-        const char* description;
-        unsigned __int16 flags;
-        char type;
-        bool modified;
-        DvarValue current;
-        DvarValue latched;
-        DvarValue reset;
-        DvarLimits domain;
-        bool(__cdecl* domainFunc)(dvar_s*, DvarValue);
-        dvar_s* hashNext;
+        const char* name;        // 0x00
+        const char* description; // 0x04
+        unsigned __int16 flags;  // 0x08
+        char type;               // 0x0A
+        bool modified;           // 0x0B
+        char pad[4];             // 0x0C  — T4-specific
+        DvarValue current;       // 0x10
+        DvarValue latched;       // 0x20
+        DvarValue reset;         // 0x30
+        DvarValue saved;         // 0x40  — T4-specific
+        DvarLimits domain;       // 0x50
+        dvar_s* hashNext;        // 0x58
     };
+    static_assert(sizeof(dvar_s) == 0x5C, "T4 dvar_s must be 0x5C bytes");
 
     struct __declspec(align(4)) WinMouseVars_t
     {
