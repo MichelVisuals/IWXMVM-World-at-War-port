@@ -61,10 +61,13 @@ namespace IWXMVM::UI
                 // overlay just won't draw that frame fully).
                 GetUIComponent(Component::Background)->Render();
                 GetUIComponent(Component::MenuBar)->Render();
-                // GameView crashes even with d3d9DevicePointer wired — likely
-                // depends on refdef_s offsets or other unwired state. Skip until
-                // fixed.
-                // GetUIComponent(Component::GameView)->Render();
+                // GameView re-enabled for T4 diagnostic. Previous note claimed
+                // refdef_s dependency, but with GetGameState() stubbed to
+                // MainMenu, Render()'s only engine touchpoints are
+                // CaptureBackBuffer + an Events listener that's pure ImGui.
+                // Defensive LOG_DEBUGs are gated inside GameView::Render to
+                // pinpoint the actual failure if one occurs.
+                GetUIComponent(Component::GameView)->Render();
                 // GetUIComponent(Component::PrimaryTabs)->Render();
                 // GetUIComponent(Component::ControlBar)->Render();
                 GetUIComponent(Component::ControlsMenu)->Render();

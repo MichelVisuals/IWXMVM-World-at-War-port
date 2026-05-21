@@ -248,7 +248,14 @@ namespace IWXMVM::T4
 
         bool IsConsoleOpen() final
         {
-            return (Structures::GetClientUIActives()->keyCatchers & 1) != 0;
+            #define ICO_STAGE(tag) do { static bool _l=false; if(!_l){_l=true; LOG_DEBUG("IsConsoleOpen stage: " tag);} } while(0)
+            ICO_STAGE("I0: enter");
+            // T4 port WIP: hard-pinned to false until clientUIActives is wired.
+            // Previously this deref'd HardAddr<0> -> SEH AV. Returning false
+            // unconditionally is fine: console state polling is only used by
+            // Input::KeyDown to suppress input while typing in the in-game
+            // console, and we have no way to detect that yet.
+            return false;
         }
 
         std::optional<Types::Dvar> GetDvar(const std::string_view name) final
