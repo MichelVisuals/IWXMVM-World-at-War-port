@@ -51,7 +51,14 @@ namespace IWXMVM::T4::Signatures
         HAddr<0> FX_SetupCamera;
         HAddr<0> R_SetViewParmsForScene;
         HAddr<0> SV_Frame;
-        HAddr<0> clientConnection;
+        // 0x00B71390 — verified via IW3 sig-pattern match against our memory
+        // dump (BA imm32 E8 rel32 80 3D imm32 00 at VA 0x00497C40). The
+        // pattern resolves once and the target is 128+ bytes of zero on
+        // main menu, consistent with an unconnected clientConnection_t.
+        // Field-layout note: the IW3-style demoplaying offset may not match
+        // T4 (per audit table); we'll discover the right offset by playing
+        // a demo and comparing memory if GetGameState doesn't transition.
+        HAddr<0x00B71390> clientConnection;
         HAddr<0> clientStatic;
         HAddr<0> clientActive;
         HAddr<0> clientGlobalsStatic;
@@ -60,7 +67,12 @@ namespace IWXMVM::T4::Signatures
         HAddr<0> fs_searchpaths;
         HAddr<0> MainWndProc;
         HAddr<0> CG_RegisterItems;
-        HAddr<0> clientUIActives;
+        // 0x00F44780 — verified via IW3 sig-pattern match (C6 05 imm32 01)
+        // against our memory dump (at VA 0x0049CF2D). This sig finds a
+        // `MOV [clientUIActive_s_addr], 1` byte-write — the deref target
+        // is the struct start. IsConsoleOpen will read keyCatchers
+        // (offset 0 in IW3 layout) — adjust if needed for T4.
+        HAddr<0x00F44780> clientUIActives;
         HAddr<0> SL_GetStringOfSize;
         HAddr<0> cg_entities;
         HAddr<0> CG_DObjGetWorldBoneMatrix;

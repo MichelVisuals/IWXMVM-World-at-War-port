@@ -160,16 +160,43 @@ namespace IWXMVM::T4
 
         Types::GameState GetGameState() final
         {
-            // T4 port WIP: globals (clientConnection, clientStatic, etc.) are
-            // still HardAddr<0>, so any access AVs. Hard-pin to MainMenu so
-            // EndScene_Hook never tries to read uninitialized state. This
-            // disables demo-aware features (Render()) but lets the overlay
-            // attempt to render.
-            //
-            // Re-enable the real logic once clientConnection is wired and the
-            // T4 dvar_s struct layout is fixed (IW3 reads current.enabled at
-            // offset 0x0C; T4 needs 0x10 due to alignment pad).
-            return Types::GameState::MainMenu;
+            // T4 port: real logic restored now that clientConnection is wired
+            // (0x00B71390). T4's clientConnection_t may have a different
+            // demoplaying offset than IW3 — if GetGameState never transitions
+            // to InDemo, search for the field by comparing memory before/after
+            // demo load (look for a dword that flips from 0 to nonzero).
+            const auto addr = GetGameAddresses().clientConnection();
+            if (!addr) return Types::GameState::MainMenu;
+
+            // cl_ingame dvar reflects whether we're in any active session.
+            // Now that FindDvar works, this gates MainMenu vs the rest.
+            auto cl_ingame = Functions::FindDvar("cl_ingame");
+            if (!cl_ingame || !cl_ingame->current.enabled)
+                return Types::GameState::MainMenu;
+
+            // T4 port diagnostic: log the first 32 dwords of clc once per
+            // session, plus every time GameState changes, so we can spot
+            // the demoplaying-offset shift if any. Keep low-frequency.
+            static int last_state = -1;
+            const auto clc = Structures::GetClientConnection();
+            int cur_state;
+            if (clc->demoplaying)
+                cur_state = (int)Types::GameState::InDemo;
+            else
+                cur_state = (int)Types::GameState::InGame;
+            if (cur_state != last_state)
+            {
+                last_state = cur_state;
+                const auto p = reinterpret_cast<const std::uint32_t*>(clc);
+                std::string s;
+                for (int i = 0; i < 16; ++i) s += std::format("[{:02}]=0x{:08X} ", i, p[i]);
+                LOG_DEBUG("GameState transition: cl_ingame=1, demoplaying={}, clc dwords: {}",
+                          (int)clc->demoplaying, s);
+            }
+
+            if (clc->demoplaying)
+                return Types::GameState::InDemo;
+            return Types::GameState::InGame;
         }
 
         Types::Features GetSupportedFeatures() final
@@ -303,14 +330,12 @@ namespace IWXMVM::T4
 
         bool IsConsoleOpen() final
         {
-            #define ICO_STAGE(tag) do { static bool _l=false; if(!_l){_l=true; LOG_DEBUG("IsConsoleOpen stage: " tag);} } while(0)
-            ICO_STAGE("I0: enter");
-            // T4 port WIP: hard-pinned to false until clientUIActives is wired.
-            // Previously this deref'd HardAddr<0> -> SEH AV. Returning false
-            // unconditionally is fine: console state polling is only used by
-            // Input::KeyDown to suppress input while typing in the in-game
-            // console, and we have no way to detect that yet.
-            return false;
+            // T4 port: clientUIActives wired to 0x00F44780 via IW3 sig
+            // pattern match. Null-guard in case the address ever resolves
+            // to 0 (e.g. signature-scan fallback fails).
+            const auto addr = GetGameAddresses().clientUIActives();
+            if (!addr) return false;
+            return (Structures::GetClientUIActives()->keyCatchers & 1) != 0;
         }
 
         std::optional<Types::Dvar> GetDvar(const std::string_view name) final
