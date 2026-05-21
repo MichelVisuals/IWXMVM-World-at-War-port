@@ -89,6 +89,12 @@ namespace IWXMVM::T4
             // skips FS_Read hook when fsh is still HardAddr<0>, so this is safe.
             Hooks::Playback::Install();
 
+            // CG_CalcViewValues candidate hunt: install per-frame call
+            // counters at 4 FP-heavy unidentified WaWMVM hook addresses.
+            // The one ticking at ~60Hz during demo playback is the per-frame
+            // view-calc function we need to hook for free camera.
+            Hooks::Playback::InstallCandidateHunt();
+
             // CL_KeyEvent demo-disconnect patch.
             // T4 CL_KeyEvent at 0x004949D0 contains:
             //   0x00494C86: 83 3D 28 15 BB 00 00   CMP [demoplaying], 0
@@ -262,6 +268,28 @@ namespace IWXMVM::T4
                     pass1_count = 0;
                     phase = 2;
                 }
+            });
+
+            // CG_CalcViewValues candidate hunt: every 120 frames (~2 sec),
+            // log the call counters from the 4 hooked candidates. The one
+            // with the highest per-2-sec delta is per-frame called = our
+            // CG_CalcViewValues target.
+            Events::RegisterListener(EventType::OnFrame, [&]() {
+                static int frame_ct = 0;
+                static std::uint32_t last[7] = {};
+                if (++frame_ct % 120 != 0) return;
+                const std::uint32_t now_a = Hooks::Playback::g_candA_hits;
+                const std::uint32_t now_b = Hooks::Playback::g_candB_hits;
+                const std::uint32_t now_c = Hooks::Playback::g_candC_hits;
+                const std::uint32_t now_d = Hooks::Playback::g_candD_hits;
+                const std::uint32_t now_e = Hooks::Playback::g_candE_hits;
+                const std::uint32_t now_f = Hooks::Playback::g_candF_hits;
+                const std::uint32_t now_g = Hooks::Playback::g_candG_hits;
+                LOG_INFO("cand-hunt: A(0x430670)+{} D(0x70CA98)+{} E(0x43E3B0)+{} F(0x446440)+{} G(0x6B6CE0)+{} (B/C unchanged)",
+                         now_a - last[0], now_d - last[3],
+                         now_e - last[4], now_f - last[5], now_g - last[6]);
+                last[0] = now_a; last[1] = now_b; last[2] = now_c; last[3] = now_d;
+                last[4] = now_e; last[5] = now_f; last[6] = now_g;
             });
 
             // T4 port: pause via timescale=0. Engine clamps to 0.001x which
