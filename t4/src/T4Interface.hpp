@@ -97,6 +97,25 @@ namespace IWXMVM::T4
 
         void SetupEventListeners() final
         {
+            LOG_DEBUG("SetupEventListeners: entered");
+            // T4 port diagnostic: probe a couple of well-known dvars to
+            // verify the new dvar_s layout reads real values, not garbage
+            // pad bytes. cg_fov default is ~65 on T4, sv_cheats default 0.
+            // Log nullness explicitly so we can distinguish "FindDvar
+            // broken" from "layout broken".
+            {
+                auto d = Functions::FindDvar("cg_fov");
+                LOG_DEBUG("dvar probe: cg_fov ptr={} value={}", (void*)d, d ? d->current.value : -1.0f);
+            }
+            {
+                auto d = Functions::FindDvar("sv_cheats");
+                LOG_DEBUG("dvar probe: sv_cheats ptr={} enabled={}", (void*)d, d ? d->current.enabled : false);
+            }
+            {
+                auto d = Functions::FindDvar("fs_basepath");
+                LOG_DEBUG("dvar probe: fs_basepath ptr={} string={}", (void*)d, (d && d->current.string) ? d->current.string : "(null)");
+            }
+
             DisableRawInput();
 
             Events::RegisterListener(EventType::PostDemoLoad, DemoParser::Run);

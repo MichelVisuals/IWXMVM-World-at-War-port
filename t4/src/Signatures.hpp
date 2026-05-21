@@ -30,8 +30,12 @@ namespace IWXMVM::T4::Signatures
         // ---- VERIFIED (Ghidra + t4-rtx) ----
         // 0x0055C000 — Ghidra confirmed via "Cbuf_AddText: overflow" string. 73 callers.
         HAddr<0x0055C000> Cbuf_AddText;
-        // 0x005C4170 — t4-rtx confirmed, Ghidra-verified function entry (41 bytes).
-        HAddr<0x005C4170> Dvar_FindMalleableVar;
+        // 0x005C4040 — verified by disassembling running game memory.
+        // t4-rtx labels 0x005C4170 as Dvar_FindVar but that's actually a
+        // value-accessor wrapper that pushes EAX (the name) and calls 0x5C4040.
+        // The real Dvar_FindVar is at 0x005C4040: __cdecl, takes name as
+        // stack arg, returns dvar_s*. Spinlock prologue + hash table walk.
+        HAddr<0x005C4040> Dvar_FindMalleableVar;
         // 0x006BBA90 — t4-rtx confirmed, Ghidra-verified function entry (15 bytes).
         HAddr<0x006BBA90> Material_RegisterHandle;
 

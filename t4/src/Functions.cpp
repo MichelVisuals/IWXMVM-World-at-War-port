@@ -7,16 +7,15 @@ namespace IWXMVM::T4::Functions
 {
     Structures::dvar_s* FindDvar(const std::string_view name)
     {
-        const char* _name = name.data();
-
-        typedef Structures::dvar_s*(__cdecl * Dvar_FindVar_t)();
-        Dvar_FindVar_t Dvar_FindVar_Internal = (Dvar_FindVar_t)GetGameAddresses().Dvar_FindMalleableVar();
-
-        __asm {
-            mov edi, _name
-        }
-
-        return Dvar_FindVar_Internal();
+        // T4 MP Dvar_FindVar = 0x005C4040, standard __cdecl with name as the
+        // first (and only) stack argument. Verified by disassembling the
+        // running game's memory dump:
+        //   push esi; push edi; <spinlock>; mov edi, [esp+0xC]; ...
+        // The 0xC offset matches a __cdecl call with 4-byte ret addr +
+        // pushed esi + pushed edi = 12 bytes of preceding stack.
+        typedef Structures::dvar_s*(__cdecl * Dvar_FindVar_t)(const char* name);
+        auto Dvar_FindVar_Internal = (Dvar_FindVar_t)GetGameAddresses().Dvar_FindMalleableVar();
+        return Dvar_FindVar_Internal(name.data());
     }
 
     std::string GetFilePath(const std::string_view demoName)
