@@ -191,6 +191,266 @@ namespace IWXMVM::T4
                 Patches::GetGamePatches().IN_Frame.Revert();
         }
 
+        // One-shot live-process diagnostic: hunt clientActive_s base via
+        // VirtualQuery walk + multi-field fingerprint. Runs SEH-guarded so a
+        // bad read past a committed-region edge can't crash the game. Results
+        // (candidate bases + matching field values) go to IWXMVM.log.
+        struct CaScanRawResult
+        {
+            std::uint32_t base_va;
+            std::uint32_t cst;       // value at offset 0x20F8
+            std::uint32_t ost;       // value at offset 0x20FC
+            std::uint32_t ofst;      // value at offset 0x2100
+            std::int32_t  std_delta; // value at offset 0x2104
+            std::uint32_t ossnap;    // value at offset 0x2108
+            std::uint32_t es;        // value at offset 0x210C
+            std::uint32_t newSnap;   // value at offset 0x2110
+        };
+
+        static int ScanCaRegionSEH(const std::uint8_t* region_base, size_t region_size,
+                                   CaScanRawResult* out_hits, int max_hits,
+                                   std::uint32_t demoStart, std::uint32_t demoEnd)
+        {
+            int n_hits = 0;
+            __try
+            {
+                // Need enough headroom for the deepest read (offset 0x2110).
+                if (region_size < 0x2200) return 0;
+                size_t end = region_size - 0x2200;
+                for (size_t off = 0; off <= end && n_hits < max_hits; off += 4)
+                {
+                    const std::uint8_t* p = region_base + off;
+                    // Relaxed fingerprint — focus on the time fields which are
+                    // best-anchored to clientActive_s offsets per T4SP-Server-Plugin
+                    // asserts. snap.valid/snapFlags are weak indicators because
+                    // T4 MP may use different values or our snap offset might be
+                    // wrong.
+                    //   p[0x20F4] (alwaysFalse): must be 0
+                    // Drop alwaysFalse check (offset 0x20F4 might not be alwaysFalse
+                    // in T4 MP — T4SP-Server-Plugin asserts may not apply). Keep the
+                    // hard-to-fake constraints: cl.serverTime is plausible; serverTimeDelta
+                    // is small SIGNED int (kills pointer-table noise); time fields form
+                    // a small cluster around cl.serverTime; newSnapshots is 0..3.
+                    std::uint32_t cst = *(const std::uint32_t*)(p + 0x20F8);
+                    // Strong filter: cst MUST be within the demo's tick range
+                    // (it's the current playhead position in server-time units).
+                    if (cst < demoStart || cst > demoEnd + 5000) continue;
+                    int std_delta = (int)*(const std::uint32_t*)(p + 0x2104);
+                    if (std_delta < -100000 || std_delta > 100000) continue;
+                    std::uint32_t ost = *(const std::uint32_t*)(p + 0x20FC);
+                    if (ost == 0) continue;
+                    int dos = (int)ost - (int)cst;
+                    if (dos < -1000 || dos > 1000) continue;
+                    std::uint32_t ofst = *(const std::uint32_t*)(p + 0x2100);
+                    if (ofst == 0) continue;
+                    int dofst = (int)ofst - (int)cst;
+                    if (dofst < -1000 || dofst > 1000) continue;
+                    std::uint32_t ossnap = *(const std::uint32_t*)(p + 0x2108);
+                    if (ossnap == 0) continue;
+                    int dosnap = (int)ossnap - (int)cst;
+                    if (dosnap < -2000 || dosnap > 2000) continue;
+                    std::uint32_t newSnap = *(const std::uint32_t*)(p + 0x2110);
+                    if (newSnap > 3) continue;
+                    std::uint32_t es = *(const std::uint32_t*)(p + 0x210C);
+                    out_hits[n_hits].base_va = (std::uint32_t)(uintptr_t)p;
+                    out_hits[n_hits].cst = cst;
+                    out_hits[n_hits].ost = ost;
+                    out_hits[n_hits].ofst = ofst;
+                    out_hits[n_hits].std_delta = std_delta;
+                    out_hits[n_hits].ossnap = ossnap;
+                    out_hits[n_hits].es = es;
+                    out_hits[n_hits].newSnap = newSnap;
+                    ++n_hits;
+                }
+                return n_hits;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                return n_hits;
+            }
+        }
+
+        // Simple value-scan: find every 32-bit value in BSS that's in [lo, hi].
+        // Bucket by 64KB page. The page with the most hits likely contains
+        // serverTime + related fields = clientActive_s neighborhood.
+        struct ValueHit
+        {
+            std::uint32_t va;
+            std::uint32_t value;
+        };
+
+        static int ScanForServerTimeValuesSEH(const std::uint8_t* region_base, size_t region_size,
+                                              std::uint32_t lo, std::uint32_t hi,
+                                              ValueHit* out_hits, int max_hits)
+        {
+            int n = 0;
+            __try
+            {
+                size_t end = region_size < 4 ? 0 : region_size - 4;
+                for (size_t off = 0; off <= end && n < max_hits; off += 4)
+                {
+                    std::uint32_t v = *(const std::uint32_t*)(region_base + off);
+                    if (v >= lo && v <= hi)
+                    {
+                        out_hits[n].va = (std::uint32_t)(uintptr_t)(region_base + off);
+                        out_hits[n].value = v;
+                        ++n;
+                    }
+                }
+                return n;
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                return n;
+            }
+        }
+
+        static void HuntClientActiveOnce()
+        {
+            // Get demo bounds from DemoParser — these were computed in PostDemoLoad.
+            // cl.serverTime MUST be within [demoStart, demoEnd] during playback.
+            auto [demoStart, demoEnd] = DemoParser::GetDemoTickRange();
+            if (demoStart == 0 || demoEnd == 0 || demoEnd <= demoStart)
+            {
+                LOG_WARN("clientActive hunt: DemoParser hasn't determined bounds yet (start={}, end={}); skipping",
+                         demoStart, demoEnd);
+                return;
+            }
+            // Widen by ~10 seconds in case serverTime is slightly outside parsed bounds
+            const std::uint32_t lo = demoStart > 10000 ? demoStart - 10000 : 0;
+            const std::uint32_t hi = demoEnd + 10000;
+            LOG_INFO("clientActive hunt: searching BSS for any uint32 in [{}..{}] (demo bounds widened)",
+                     lo, hi);
+
+            // Value-only scan
+            constexpr int MAX_VALUE_HITS = 2048;
+            static ValueHit value_hits[MAX_VALUE_HITS];
+            int total_value_hits = 0;
+            {
+                std::uintptr_t addr = 0x01000000;
+                constexpr std::uintptr_t SCAN_HI = 0x05000000;
+                while (addr < SCAN_HI && total_value_hits < MAX_VALUE_HITS)
+                {
+                    MEMORY_BASIC_INFORMATION mbi{};
+                    if (::VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0)
+                    {
+                        addr += 0x1000;
+                        continue;
+                    }
+                    std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+                    if (mbi.State == MEM_COMMIT &&
+                        (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0 &&
+                        (mbi.Protect & PAGE_GUARD) == 0)
+                    {
+                        std::uintptr_t scan_start = std::max(addr, reinterpret_cast<std::uintptr_t>(mbi.BaseAddress));
+                        std::uintptr_t scan_end = std::min(region_end, SCAN_HI);
+                        if (scan_end > scan_start)
+                        {
+                            int got = ScanForServerTimeValuesSEH(
+                                reinterpret_cast<const std::uint8_t*>(scan_start),
+                                scan_end - scan_start, lo, hi,
+                                value_hits + total_value_hits, MAX_VALUE_HITS - total_value_hits);
+                            total_value_hits += got;
+                        }
+                    }
+                    addr = region_end > addr ? region_end : addr + 0x1000;
+                }
+            }
+            LOG_INFO("clientActive hunt: found {} uint32 values in demo range", total_value_hits);
+
+            // Cluster by 64KB page
+            std::map<std::uint32_t, int> page_counts;
+            for (int i = 0; i < total_value_hits; ++i)
+                page_counts[value_hits[i].va & ~0xFFFF]++;
+            std::vector<std::pair<std::uint32_t, int>> ranked(page_counts.begin(), page_counts.end());
+            std::sort(ranked.begin(), ranked.end(),
+                      [](const auto& a, const auto& b) { return a.second > b.second; });
+            LOG_INFO("clientActive hunt: top pages by demo-time-value density:");
+            for (int i = 0; i < (int)ranked.size() && i < 10; ++i)
+            {
+                LOG_INFO("  page=0x{:08X}  hits={}", ranked[i].first, ranked[i].second);
+            }
+            // Print all hits within the TOP page (probable clientActive_s neighborhood).
+            // Show offset within page so we can identify cl.serverTime's field offset.
+            if (!ranked.empty())
+            {
+                std::uint32_t top_page = ranked[0].first;
+                LOG_INFO("clientActive hunt: ALL hits in top page 0x{:08X} (offset within page -> value):", top_page);
+                int printed = 0;
+                for (int i = 0; i < total_value_hits && printed < 250; ++i)
+                {
+                    if ((value_hits[i].va & ~0xFFFF) != top_page) continue;
+                    std::uint32_t offset = value_hits[i].va & 0xFFFF;
+                    LOG_INFO("  +0x{:04X} (0x{:08X}) = {}", offset, value_hits[i].va, value_hits[i].value);
+                    ++printed;
+                }
+                // Also dump the second page just in case it's part of the same struct
+                if (ranked.size() > 1)
+                {
+                    std::uint32_t p2 = ranked[1].first;
+                    LOG_INFO("clientActive hunt: hits in 2nd-best page 0x{:08X}:", p2);
+                    printed = 0;
+                    for (int i = 0; i < total_value_hits && printed < 100; ++i)
+                    {
+                        if ((value_hits[i].va & ~0xFFFF) != p2) continue;
+                        std::uint32_t offset = value_hits[i].va & 0xFFFF;
+                        LOG_INFO("  +0x{:04X} (0x{:08X}) = {}", offset, value_hits[i].va, value_hits[i].value);
+                        ++printed;
+                    }
+                }
+            }
+            return;
+
+            constexpr int MAX_HITS = 32;
+            CaScanRawResult hits[MAX_HITS] = {};
+            int total = 0;
+            constexpr std::uintptr_t SCAN_LO = 0x01000000;
+            constexpr std::uintptr_t SCAN_HI = 0x05000000;
+            std::uintptr_t addr = SCAN_LO;
+            int regions_scanned = 0;
+            int regions_skipped = 0;
+            while (addr < SCAN_HI && total < MAX_HITS)
+            {
+                MEMORY_BASIC_INFORMATION mbi{};
+                if (::VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0)
+                {
+                    addr += 0x1000;
+                    continue;
+                }
+                std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+                if (mbi.State == MEM_COMMIT &&
+                    (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0 &&
+                    (mbi.Protect & PAGE_GUARD) == 0)
+                {
+                    std::uintptr_t scan_start = std::max(addr, (std::uintptr_t)reinterpret_cast<std::uintptr_t>(mbi.BaseAddress));
+                    std::uintptr_t scan_end = std::min(region_end, SCAN_HI);
+                    if (scan_end > scan_start)
+                    {
+                        int got = ScanCaRegionSEH(
+                            reinterpret_cast<const std::uint8_t*>(scan_start),
+                            scan_end - scan_start,
+                            hits + total, MAX_HITS - total,
+                            demoStart, demoEnd);
+                        total += got;
+                        ++regions_scanned;
+                    }
+                }
+                else
+                {
+                    ++regions_skipped;
+                }
+                addr = region_end > addr ? region_end : addr + 0x1000;
+            }
+            LOG_INFO("clientActive hunt: scanned {} regions, skipped {}, found {} candidates",
+                     regions_scanned, regions_skipped, total);
+            for (int i = 0; i < total; ++i)
+            {
+                const auto& h = hits[i];
+                LOG_INFO("  candidate[{}] base=0x{:08X}  cst={}  ost={}  ofst={}  delta={}  ossnap={}  es={}  newSnap={}",
+                         i, h.base_va, h.cst, h.ost, h.ofst, h.std_delta, h.ossnap, h.es, h.newSnap);
+            }
+        }
+
         Types::GameState GetGameState() final
         {
             const auto addr = GetGameAddresses().clientConnection();
@@ -242,8 +502,37 @@ namespace IWXMVM::T4
             demoInfo.path = lastDemoPath.string();
 
             auto [demoStartTick, demoEndTick] = DemoParser::GetDemoTickRange();
-            demoInfo.gameTick = 0;
+
+            // T4 port WIP: clientActive_s.cl.serverTime working hypothesis is at
+            // 0x01F00DD0 (page 0x01F00000 had 217 hits of demo-time values; the
+            // first paired hits at offsets 0x0DD0/0x0DD4 look like cl.serverTime
+            // and cl.oldServerTime, with a clSnapshot_t-shaped gap after, then
+            // a parseEntities-like 0xB4-stride array). If the timeline playhead
+            // advances correctly during playback, this is confirmed. If not,
+            // the value here will tell us by how much we're off.
+            constexpr std::uintptr_t CL_SERVERTIME_VA = 0x01F00DD0;
+            const std::uint32_t cl_serverTime = *reinterpret_cast<volatile std::uint32_t*>(CL_SERVERTIME_VA);
+
+            if (cl_serverTime > demoStartTick && cl_serverTime < demoEndTick + 5000)
+            {
+                demoInfo.gameTick = cl_serverTime - demoStartTick;
+            }
+            else
+            {
+                demoInfo.gameTick = 0;
+            }
             demoInfo.endTick = (demoEndTick > demoStartTick) ? (demoEndTick - demoStartTick) : 1;
+
+            // Log once per second to track whether cl_serverTime is advancing
+            static std::uint32_t last_logged = 0;
+            static int frame_counter = 0;
+            ++frame_counter;
+            if (frame_counter % 60 == 0 && cl_serverTime != last_logged)
+            {
+                LOG_DEBUG("cl.serverTime probe: [0x{:08X}] = {} (gameTick={}, endTick={})",
+                          CL_SERVERTIME_VA, cl_serverTime, demoInfo.gameTick, demoInfo.endTick);
+                last_logged = cl_serverTime;
+            }
 
             return demoInfo;
         }
@@ -255,8 +544,6 @@ namespace IWXMVM::T4
 
         void PlayDemo(std::filesystem::path demoPath) final
         {
-            Events::Invoke(EventType::PreDemoLoad);
-
             // T4 port: WaW always reads demos from
             // %LocalAppData%\Activision\CoDWaW\demos\, regardless of how
             // Steam configures fs_homepath. On a Steam install the
@@ -313,10 +600,41 @@ namespace IWXMVM::T4
                 // WaW expects the demo name WITHOUT extension — it appends
                 // .dm_<protocol> itself.
                 const auto demoArg = resolvedPath.stem().string();
+                // Store stem + path BEFORE invoking PreDemoLoad so DemoParser
+                // (which fires from that event and calls GetDemoInfo().path)
+                // sees the correct path. Previously this was set AFTER the
+                // event, leaving DemoParser to parse "" and never populate
+                // demoStartTick/demoEndTick — hence the timeline only ever
+                // showed 0.
                 lastDemoStem = demoArg;
                 lastDemoPath = resolvedPath;
+
+                Events::Invoke(EventType::PreDemoLoad);
+
                 LOG_DEBUG("PlayDemo: issuing `demo \"{0}\"`", demoArg);
                 Functions::Cbuf_AddText(std::format(R"(demo "{0}")", demoArg));
+
+                // T4 port: normally PostDemoLoad is fired from a hook in
+                // Hooks::Commands::Install (which is still disabled because
+                // it has unwired IW3 addresses). Fire it directly here so
+                // DemoParser::Run gets called and the timeline endTick gets
+                // populated. Listeners (CameraManager, KeyframeManager,
+                // DemoParser, etc.) reset their state — perfectly fine
+                // since we're about to play this demo from frame 0.
+                LOG_DEBUG("PlayDemo: invoking PostDemoLoad (path={})", lastDemoPath.string());
+                try
+                {
+                    Events::Invoke(EventType::PostDemoLoad);
+                    LOG_DEBUG("PlayDemo: PostDemoLoad returned cleanly");
+                }
+                catch (const std::exception& e)
+                {
+                    LOG_ERROR("PlayDemo: PostDemoLoad listener threw std::exception: {}", e.what());
+                }
+                catch (...)
+                {
+                    LOG_ERROR("PlayDemo: PostDemoLoad listener threw non-std exception");
+                }
             }
             catch (std::filesystem::filesystem_error& e)
             {

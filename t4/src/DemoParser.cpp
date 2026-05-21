@@ -44,11 +44,15 @@ namespace IWXMVM::T4::DemoParser
 
     void Run()
     {
-        std::ifstream file(Mod::GetGameInterface()->GetDemoInfo().path, std::ios::binary);
+        const auto path = Mod::GetGameInterface()->GetDemoInfo().path;
+        LOG_DEBUG("DemoParser::Run starting, path={}", path);
+        std::ifstream file(path, std::ios::binary);
         if (!file.is_open())
         {
+            LOG_ERROR("DemoParser::Run failed to open demo file: {}", path);
             throw std::exception("failed to open demo file");
         }
+        LOG_DEBUG("DemoParser::Run opened demo file");
 
         std::vector<clientArchiveData_t> archives;
 
