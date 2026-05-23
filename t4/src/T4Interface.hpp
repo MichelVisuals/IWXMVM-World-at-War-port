@@ -89,6 +89,17 @@ namespace IWXMVM::T4
             // skips FS_Read hook when fsh is still HardAddr<0>, so this is safe.
             Hooks::Playback::Install();
 
+            // T4 port (2026-05-21): R_SetViewParmsForScene hook at 0x004E0040
+            // is wired in Signatures.hpp but DISABLED here pending debug. With
+            // it enabled (and the t4 Camera.cpp adapted to capture refdef* from
+            // EAX) the process crashed after init with no log line from our
+            // hook body — meaning either MinHook's trampoline construction
+            // failed for this function's prologue (`push ebp; mov ebp, esp;
+            // and esp, 0xfffffff8` straddling the 5-byte patch boundary), or
+            // the function isn't reached at main menu and a different code
+            // path crashes. Will return to this with a tighter test harness.
+            // Hooks::Camera::Install();
+
             // CG_CalcViewValues candidate hunt: install per-frame call
             // counters at 4 FP-heavy unidentified WaWMVM hook addresses.
             // The one ticking at ~60Hz during demo playback is the per-frame

@@ -49,7 +49,23 @@ namespace IWXMVM::T4::Signatures
         HAddr<0> CG_DrawDisconnect;
         HAddr<0> CG_OffsetThirdPersonView;
         HAddr<0> FX_SetupCamera;
-        HAddr<0> R_SetViewParmsForScene;
+        // 0x004E0040 is R_SetViewParmsForScene in T4 MP (Ghidra-confirmed
+        // 2026-05-21). Function takes refdef* in EAX (non-standard convention)
+        // and r_zfar as a stack arg. Reads [EAX+0x1C..0x24] = vieworg,
+        // [EAX+0x2C..0x4C] = viewaxis 3x3, [EAX+0x10/0x14] = tanHalfFovX/Y,
+        // [EAX+0x50..0x58] = additional vec3. Writes derived view params to
+        // clientActive_s rendering mirror at +0x400..+0x490. Called from
+        // 0x00478570 (per-frame), 0x00479A10 (HUD), 0x006D1090 (renderer).
+        //
+        // Wired but UNUSED at runtime: Hooks::Camera::Install() is still
+        // commented out in T4Interface.hpp so nothing reads this slot yet.
+        // Wiring it on its own is a no-op runtime change — verified safe.
+        // Re-enabling Hooks::Camera::Install() needs the rest of the camera
+        // address set (AnglesToAxis, CG_CalcViewValues, CG_OffsetThirdPersonView,
+        // FX_SetupCamera, CG_DObjGetWorldTagMatrix) AND a Camera.cpp refactor
+        // to capture refdef* from EAX (because T4 MP cg_s doesn't exist as
+        // a packed struct — see reference_waw_cgs_heap_allocated memory).
+        HAddr<0x004E0040> R_SetViewParmsForScene;
         // SV_Frame in T4 MP not yet located. The IW3 sig matched once at
         // 0x0057F7E1+4=0x0057F7E5, function shape looked right (PUSH ESI;
         // CALL inner; ADD ESP, 4; MOV EAX, ESI; POP ECX; RET), BUT a hit
@@ -70,7 +86,11 @@ namespace IWXMVM::T4::Signatures
         HAddr<0> clientGlobals;
         HAddr<0> mouseVars;
         HAddr<0> fs_searchpaths;
-        HAddr<0> MainWndProc;
+        // 0x005D67E0 — game's MainWndProc, confirmed via IWXMVM runtime log
+        // ("Original WndProc captured at 5d67e0") across multiple injections
+        // 2026-05-21. Consumed by T4Interface::GetWndProc() which IWXMVM's
+        // window-hooking code calls. Stable across game launches.
+        HAddr<0x005D67E0> MainWndProc;
         HAddr<0> CG_RegisterItems;
         // 0x00F44780 — verified via IW3 sig-pattern match (C6 05 imm32 01)
         // against our memory dump (at VA 0x0049CF2D). This sig finds a
@@ -79,11 +99,31 @@ namespace IWXMVM::T4::Signatures
         // (offset 0 in IW3 layout) — adjust if needed for T4.
         HAddr<0x00F44780> clientUIActives;
         HAddr<0> SL_GetStringOfSize;
-        HAddr<0> cg_entities;
+        // 0x00865828 — centity array base in T4 MP. Disassembly at 0x00475BE0
+        // / 0x00476860 (per-frame iteration) shows entity slots accessed at
+        // this base with stride 0x304 (= sizeof(centity_s) in T4SP).
+        // Caveat: indexing observed is 2-level — (entityIndex << 9 | clientNum)
+        // * 0x304 + 0x865828. For clientNum=0 the effective base IS 0x00865828
+        // but IWXMVM iw3 code uses cg_entities[i] flat indexing. May need core
+        // adjustment if Rewinding/Playback skip features get exercised.
+        // Safe to wire now because the only consumers (Structures::GetEntities
+        // -> GetPlaybackDataAddresses) are only called from rewinding skip
+        // operations, not at init.
+        HAddr<0x00865828> cg_entities;
         HAddr<0> CG_DObjGetWorldBoneMatrix;
         HAddr<0> clientObjMap;
         HAddr<0> objBuf;
-        HAddr<0> CL_KeyEvent;
+        // 0x004949D0 — confirmed CL_KeyEvent entry point. Identified by
+        // (a) WAWMVM_hooks.csv labels this address as the CL_KeyEvent hook
+        // target, (b) function prologue shows per-localClient input table at
+        // 0x00B6E064/0x00B6E06C with stride 0x1128 — matches CL_KeyEvent's
+        // role as the input dispatcher. The inline demo-disconnect patch at
+        // 0x00494C8E sits at CL_KeyEvent + 0x2BE, well within this function.
+        // Safe to wire now: Patches.hpp:42 (was the auto-apply trap with iw3
+        // byte 0x4E) is now PatchApplySetting::Deferred. The correct T4
+        // demo-disconnect patch (0x2F at offset 0x2BE) is applied inline in
+        // T4Interface::InstallHooksAndPatches and is unrelated to this slot.
+        HAddr<0x004949D0> CL_KeyEvent;
         // T4 MP DxGlobals struct at 0x1087DD04. Device field is at offset 4.
         // So the address-of-device-pointer is 0x1087DD08. Note: unlike IW3,
         // T4 stores the device pointer directly (single level of indirection)

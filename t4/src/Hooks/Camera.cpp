@@ -39,7 +39,7 @@ namespace IWXMVM::T4::Hooks::Camera
 
         R_SetViewParmsForScene();
 
-        __asm popad 
+        __asm popad
         __asm jmp R_SetViewParmsForScene_Trampoline
     }
 
