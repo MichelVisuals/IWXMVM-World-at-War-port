@@ -133,7 +133,7 @@ namespace IWXMVM::IW3
 
         Types::Features GetSupportedFeatures() final
         {
-            return Types::Features_ChangeAnimations;
+            return (Types::Features)(Types::Features_ChangeAnimations | Types::Features_Rewinding);
         }
 
         void InitializeGameAddresses() final

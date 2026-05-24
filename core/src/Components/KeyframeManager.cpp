@@ -352,7 +352,12 @@ namespace IWXMVM::Components
             return keyframes.back().value;
 
         // TODO: interpolation selection in the future
-        if (keyframes.size() < 4)
+        // 2026-05-24: previously used linear for <4 keyframes (straight-line
+        // segments). The cubic spline math actually works with 2+ keyframes
+        // (see MathUtils::InterpolateCubicSpline). Switching to always-cubic
+        // so 2-3 keyframe campaths get the same smooth curve users see at
+        // 4+, matching what IWXMVM users remember as "bezier-like" campaths.
+        if (keyframes.size() < 2)
             return LinearlyInterpolate(property.valueType, keyframes, tick);
 
         return CubicInterpolate(property.valueType, keyframes, tick);

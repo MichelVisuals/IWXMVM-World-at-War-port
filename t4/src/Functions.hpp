@@ -9,7 +9,12 @@ namespace IWXMVM::T4::Functions
 
     void Cbuf_AddText(std::string command);
 
-    uint16_t SL_GetStringOfSize(const char* string, int entityType, int stringLength);
+    // T4 MP signature is 4-arg (NOT IW3's 3-arg):
+    //   inst = scriptInstance (0 = server-side / default)
+    //   string = the interned string
+    //   user = entity-class flags (1 for normal lookups)
+    //   len = strlen(string) + 1 (includes null terminator)
+    uint16_t SL_GetStringOfSize(int inst, const char* string, unsigned int user, unsigned int len);
 
     bool CG_DObjGetWorldBoneMatrix(Structures::centity_s* entity /*@<eax>*/, int boneIndex /*@<ecx>*/,
                                         float* matrix /*@<esi>*/, Structures::DObj_s* dobj, float* origin);

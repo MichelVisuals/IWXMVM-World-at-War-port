@@ -57,12 +57,12 @@ namespace IWXMVM::T4::Functions
         }
     }
 
-    uint16_t SL_GetStringOfSize(const char* string, int entityType, int stringLength)
+    uint16_t SL_GetStringOfSize(int inst, const char* string, unsigned int user, unsigned int len)
     {
-        typedef uint16_t(__cdecl * SL_GetStringOfSize_t)(const char*, int, int);
+        typedef uint16_t(__cdecl * SL_GetStringOfSize_t)(int, const char*, unsigned int, unsigned int);
         SL_GetStringOfSize_t SL_GetStringOfSize = (SL_GetStringOfSize_t)GetGameAddresses().SL_GetStringOfSize();
 
-        return SL_GetStringOfSize(string, entityType, stringLength);
+        return SL_GetStringOfSize(inst, string, user, len);
     }
 
     

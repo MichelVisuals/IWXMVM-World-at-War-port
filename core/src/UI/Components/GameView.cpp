@@ -204,6 +204,16 @@ namespace IWXMVM::UI
         }
     }
 
+    // T4 port (2026-05-23): flag the SetCursorPos hook (in D3D9.cpp) when
+    // LockMouse is the caller, so the hook lets the centering through even
+    // while our blanket demo-time SetCursorPos suppression is active. The
+    // suppression exists to keep WaW's IN_Frame from re-centering the cursor
+    // and stealing it from the IWXMVM overlay; LockMouse is a different,
+    // legitimate caller that the suppression must NOT block, otherwise
+    // ImGui's MouseDelta gets a permanent (cursor - viewportCenter) phantom
+    // delta and the freecam spins continuously.
+    std::atomic<bool> g_setCursorPosFromLockMouse{false};
+
     void GameView::LockMouse()
     {
         // calling FindWindowHandle every frame here is probably not a good idea
@@ -215,7 +225,9 @@ namespace IWXMVM::UI
         ImVec2 viewportCenter = ImVec2(glm::floor(windowPosition.x + GetPosition().x + GetSize().x / 2),
                                        glm::floor(windowPosition.y + GetPosition().y + GetSize().y / 2));
         ImGui::GetIO().MousePosPrev += ImVec2(viewportCenter.x - cursorPosition.x, viewportCenter.y - cursorPosition.y);
+        g_setCursorPosFromLockMouse.store(true, std::memory_order_release);
         SetCursorPos(static_cast<int32_t>(viewportCenter.x), static_cast<int32_t>(viewportCenter.y));
+        g_setCursorPosFromLockMouse.store(false, std::memory_order_release);
     }
 
     void GameView::Initialize()

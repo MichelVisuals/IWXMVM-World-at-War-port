@@ -57,4 +57,9 @@ namespace IWXMVM::T4::Structures
         return (DObj_s*)GetGameAddresses().objBuf();
     }
 
+    refdef_s* GetRefdef()
+    {
+        return (refdef_s*)GetGameAddresses().refdef();
+    }
+
 }  // namespace IWXMVM::T4::Structures

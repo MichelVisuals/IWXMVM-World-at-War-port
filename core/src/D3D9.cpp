@@ -9,6 +9,7 @@
 #include "Utilities/PathUtils.hpp"
 #include "Mod.hpp"
 #include "UI/UIManager.hpp"
+#include "UI/Components/GameView.hpp"
 #include "Utilities/HookManager.hpp"
 
 namespace IWXMVM::D3D9
@@ -80,12 +81,23 @@ namespace IWXMVM::D3D9
                       Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo);
         }
 
-        // T4 port: suppress unconditionally while a demo is playing — the
-        // user expects to interact with IWXMVM panels during playback and
-        // there's no scenario where WaW needs to recenter the cursor in
-        // that state. (When the user wants to control freecam, IWXMVM's
-        // freecam camera takes over input via a different path that doesn't
-        // depend on SetCursorPos.)
+        // T4 port (2026-05-23): when GameView::LockMouse is the caller, ALWAYS
+        // let the SetCursorPos through. LockMouse needs to actually warp the
+        // cursor to viewportCenter for its MousePosPrev compensation trick
+        // to work — otherwise ImGui's MouseDelta picks up a permanent phantom
+        // (cursor - center) delta and freecam spins endlessly.
+        // See UI/Components/GameView.cpp::LockMouse and the
+        // g_setCursorPosFromLockMouse flag set right around the SetCursorPos
+        // call there.
+        if (UI::g_setCursorPosFromLockMouse.load(std::memory_order_acquire))
+        {
+            if (!OriginalSetCursorPos) return FALSE;
+            return OriginalSetCursorPos(X, Y);
+        }
+
+        // T4 port: otherwise, suppress while a demo is playing or IWXMVM
+        // owns input. (Blanket suppression keeps WaW's IN_Frame from
+        // stealing the cursor from our overlay during playback.)
         if (UI::UIManager::Get().IsInputCaptured() ||
             Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo)
         {
@@ -254,6 +266,39 @@ namespace IWXMVM::D3D9
         if (CheckForOverlays(returnAddress))
         {
             return EndScene(pDevice);
+        }
+
+        // T4 port (2026-05-23 session 4): restore GraphicsManager::Render
+        // so campath visualizers (camera-icon meshes + yellow connecting
+        // line) appear in the captured GameView texture. Must run BEFORE
+        // RunImGuiFrame because GameView::Draw inside that frame call is
+        // what samples the backbuffer (CaptureBackBuffer). Without this,
+        // GraphicsManager::Render sat in the dead-code block below — built
+        // but never invoked. try/catch keeps any engine-state assumption it
+        // makes (refdef, cg_s) from killing the d3d9 hook.
+        if (Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo)
+        {
+            static bool gfx_failed_logged = false;
+            try
+            {
+                GFX::GraphicsManager::Get().Render();
+            }
+            catch (const std::exception& e)
+            {
+                if (!gfx_failed_logged)
+                {
+                    gfx_failed_logged = true;
+                    LOG_CRITICAL("GraphicsManager::Render threw std::exception: {} (further silenced)", e.what());
+                }
+            }
+            catch (...)
+            {
+                if (!gfx_failed_logged)
+                {
+                    gfx_failed_logged = true;
+                    LOG_CRITICAL("GraphicsManager::Render threw non-std exception (further silenced)");
+                }
+            }
         }
 
         if (!imguiRenderedThisFrame)

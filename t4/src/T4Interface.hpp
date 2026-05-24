@@ -100,11 +100,13 @@ namespace IWXMVM::T4
             // path crashes. Will return to this with a tighter test harness.
             // Hooks::Camera::Install();
 
-            // CG_CalcViewValues candidate hunt: install per-frame call
-            // counters at 4 FP-heavy unidentified WaWMVM hook addresses.
-            // The one ticking at ~60Hz during demo playback is the per-frame
-            // view-calc function we need to hook for free camera.
-            Hooks::Playback::InstallCandidateHunt();
+            // Free camera install (2026-05-23): R_SetViewParmsForScene only.
+            // The hook body in Hooks/Camera.cpp gates writes on
+            // CameraManager's active camera mode. FirstPerson/ThirdPerson →
+            // no override (game state syncs into our Camera). Free/Orbit/
+            // Dolly/Bone → camera position + FOV write into refdef.
+            // Supersedes the +200 Z test hook from earlier this session.
+            Hooks::Camera::InstallRefdefOnly();
 
             // CL_KeyEvent demo-disconnect patch.
             // T4 CL_KeyEvent at 0x004949D0 contains:
@@ -187,129 +189,71 @@ namespace IWXMVM::T4
                 Functions::FindDvar("con_gamemsgwindow0linecount")->current.integer = 4;
             });
 
-            // T4 port hunt: two-pass scan for cls.realtime (engine ms since
-            // launch). Pass 1 records all small-positive uint32s. Pass 2
-            // checks 2 seconds later and reports values that advanced by
-            // ~1500-2500 ms. Filters out spikes/snapshots; clean signal for
-            // monotonic engine clocks. clientStatic_s.realtime is at offset
-            // 0x150 per T4SP-Server-Plugin asserts, so once we have the VA we
-            // derive the struct base. (Also exposes related clocks like
-            // cl.snap.serverTime, cgs.time, etc.)
+            // Backward-seek-via-restart driver. After SeekBackward restarts
+            // the demo, the playhead resets near tick 0. Once it's clearly
+            // back at the start (gameTick < target), fast-forward to the
+            // target via Components::Playback::SkipDemoForward (which writes
+            // cls.realtime + ticks).
             Events::RegisterListener(EventType::OnFrame, [&]() {
-                constexpr int BUF_SIZE = 65536;
-                static RtPair* pass1_buf = nullptr;
-                static int pass1_count = 0;
-                static int phase = 0;  // 0=idle, 1=did pass1, 2=done
-                static int wait_counter = 0;
-
-                if (phase >= 2) return;
+                if (pendingSkipForwardTarget < 0) return;
                 if (GetGameState() != Types::GameState::InDemo) return;
 
-                if (phase == 0)
-                {
-                    LOG_INFO("realtime-hunt pass 1: scanning BSS for engine-clock candidates");
-                    if (!pass1_buf)
-                        pass1_buf = new RtPair[BUF_SIZE];
-                    pass1_count = 0;
+                const auto curTick = static_cast<std::int32_t>(GetDemoInfo().gameTick);
 
-                    std::uintptr_t addr = 0x01000000;
-                    while (addr < 0x05000000)
-                    {
-                        MEMORY_BASIC_INFORMATION mbi{};
-                        if (::VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0)
-                        {
-                            addr += 0x1000;
-                            continue;
-                        }
-                        const std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-                        if (mbi.State == MEM_COMMIT &&
-                            (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0 &&
-                            (mbi.Protect & PAGE_GUARD) == 0)
-                        {
-                            const std::uintptr_t scan_end = std::min(region_end, (std::uintptr_t)0x05000000);
-                            RealtimeScanRegionSEH((std::uintptr_t)mbi.BaseAddress, scan_end,
-                                                   pass1_buf, BUF_SIZE, pass1_count);
-                        }
-                        addr = region_end > addr ? region_end : addr + 0x1000;
-                    }
-                    LOG_INFO("realtime-hunt pass 1: captured {} candidates; sleeping ~2s for pass 2",
-                             pass1_count);
-                    phase = 1;
-                    wait_counter = 0;
-                }
-                else if (phase == 1)
-                {
-                    ++wait_counter;
-                    if (wait_counter < 600) return;  // ~5s @ 120fps, ~10s @ 60fps
+                // Wait until the demo has clearly restarted (curTick below
+                // the target by a healthy margin). This avoids racing the
+                // OnFrame against PlayDemo's PostDemoLoad flow.
+                if (curTick >= pendingSkipForwardTarget)
+                    return;
 
-                    LOG_INFO("realtime-hunt pass 2: checking advancement after {} frames", wait_counter);
-                    int reported = 0;
-                    // First, count by delta bucket to see the distribution
-                    int bucket_negative = 0, bucket_0_100 = 0, bucket_100_1000 = 0,
-                        bucket_1000_5000 = 0, bucket_5000_20000 = 0, bucket_huge = 0;
-                    for (int i = 0; i < pass1_count; ++i)
-                    {
-                        std::uint32_t new_val = 0;
-                        if (RealtimeReadSEH(pass1_buf[i].va, new_val) != 0) continue;
-                        if (new_val < pass1_buf[i].value) { ++bucket_negative; continue; }
-                        const std::uint32_t delta = new_val - pass1_buf[i].value;
-                        if      (delta < 100)    ++bucket_0_100;
-                        else if (delta < 1000)   ++bucket_100_1000;
-                        else if (delta < 5000)   ++bucket_1000_5000;
-                        else if (delta < 20000)  ++bucket_5000_20000;
-                        else                     ++bucket_huge;
-
-                        // Report candidates whose delta is in 1000-20000 range
-                        // (typical engine ms clock advancement for our wait period
-                        // depending on fps and timescale).
-                        if (delta >= 1000 && delta <= 20000 && reported < 80)
-                        {
-                            LOG_INFO("  cls.realtime cand @ 0x{:08X}: {} -> {} (delta={}, cls_base candidate=0x{:08X})",
-                                     pass1_buf[i].va, pass1_buf[i].value, new_val,
-                                     delta, pass1_buf[i].va - 0x150);
-                            ++reported;
-                        }
-                    }
-                    LOG_INFO("realtime-hunt deltas: <0:{}, 0-100:{}, 100-1K:{}, 1K-5K:{}, 5K-20K:{}, >20K:{}",
-                             bucket_negative, bucket_0_100, bucket_100_1000,
-                             bucket_1000_5000, bucket_5000_20000, bucket_huge);
-                    LOG_INFO("realtime-hunt: reported {} candidates", reported);
-                    delete[] pass1_buf;
-                    pass1_buf = nullptr;
-                    pass1_count = 0;
-                    phase = 2;
-                }
+                // Demo has restarted and is BEFORE the target. Fast-forward.
+                const auto delta = pendingSkipForwardTarget - curTick;
+                LOG_INFO("backward-seek: post-restart curTick={} target={} -> SkipDemoForward({})",
+                         curTick, pendingSkipForwardTarget, delta);
+                Components::Playback::SkipDemoForward(delta);
+                pendingSkipForwardTarget = -1;
             });
 
-            // CG_CalcViewValues candidate hunt: every 120 frames (~2 sec),
-            // log the call counters from the 4 hooked candidates. The one
-            // with the highest per-2-sec delta is per-frame called = our
-            // CG_CalcViewValues target.
+            // T4 port 2026-05-24: TRUE PAUSE via cls.realtime freeze.
+            // The engine's per-frame ADD [cls.realtime], ESI at 0x004998BA
+            // runs once per frame. We can't hook it cleanly (MinHook can't
+            // trampoline the prologue), so instead we write cls.realtime
+            // BACK to a snapshot value AFTER the engine's increment each
+            // frame. Net advance per frame = 0 → demo time stays frozen.
+            // Works in tandem with the timescale=0 workaround below: that
+            // keeps msec tiny so the brief inter-frame drift is invisible.
             Events::RegisterListener(EventType::OnFrame, [&]() {
-                static int frame_ct = 0;
-                static std::uint32_t last[7] = {};
-                if (++frame_ct % 120 != 0) return;
-                const std::uint32_t now_a = Hooks::Playback::g_candA_hits;
-                const std::uint32_t now_b = Hooks::Playback::g_candB_hits;
-                const std::uint32_t now_c = Hooks::Playback::g_candC_hits;
-                const std::uint32_t now_d = Hooks::Playback::g_candD_hits;
-                const std::uint32_t now_e = Hooks::Playback::g_candE_hits;
-                const std::uint32_t now_f = Hooks::Playback::g_candF_hits;
-                const std::uint32_t now_g = Hooks::Playback::g_candG_hits;
-                LOG_INFO("cand-hunt: A(0x430670)+{} D(0x70CA98)+{} E(0x43E3B0)+{} F(0x446440)+{} G(0x6B6CE0)+{} (B/C unchanged)",
-                         now_a - last[0], now_d - last[3],
-                         now_e - last[4], now_f - last[5], now_g - last[6]);
-                last[0] = now_a; last[1] = now_b; last[2] = now_c; last[3] = now_d;
-                last[4] = now_e; last[5] = now_f; last[6] = now_g;
+                static bool wasFreezing = false;
+                static std::int32_t frozenRealtime = 0;
+                auto* cls = Structures::GetClientStatic();
+                if (!cls) return;
+                if (GetGameState() != Types::GameState::InDemo)
+                {
+                    wasFreezing = false;
+                    return;
+                }
+                const bool isPaused = IWXMVM::Components::Playback::IsPaused();
+                if (isPaused)
+                {
+                    if (!wasFreezing)
+                    {
+                        frozenRealtime = cls->realtime;
+                        wasFreezing = true;
+                        LOG_DEBUG("t4 cls.realtime freeze: PAUSED at realtime={}", frozenRealtime);
+                    }
+                    cls->realtime = frozenRealtime;  // override engine's increment
+                }
+                else if (wasFreezing)
+                {
+                    wasFreezing = false;
+                    LOG_DEBUG("t4 cls.realtime freeze: UNPAUSED (realtime resumes from {})", cls->realtime);
+                }
             });
 
             // T4 port: pause via timescale=0. Engine clamps to 0.001x which
             // is effectively frozen for camera composition (a 74-sec demo
-            // plays in 20+ hours at that rate). Not TRUE freeze — true pause
-            // would need SV_Frame hook (T4 addr not yet located; needs
-            // leaked-source or Ghidra session). Earlier NOP-write attempts
-            // accelerated the demo because the addresses we found were
-            // "previous realtime" buffers — see git log e71155d..bf8ac48.
+            // plays in 20+ hours at that rate). Used in tandem with the
+            // cls.realtime freeze above for true pause.
             Events::RegisterListener(EventType::OnFrame, [&]() {
                 static bool wasPaused = false;
                 static float savedTimescale = 1.0f;
@@ -322,15 +266,21 @@ namespace IWXMVM::T4
                 if (isPaused == wasPaused) return;
                 wasPaused = isPaused;
                 auto* ts = Functions::FindDvar("timescale");
-                if (!ts) return;
+                if (!ts)
+                {
+                    LOG_WARN("t4 pause sync: timescale dvar not found");
+                    return;
+                }
                 if (isPaused)
                 {
                     if (ts->current.value > 0.0f) savedTimescale = ts->current.value;
                     ts->current.value = 0.0f;
+                    LOG_DEBUG("t4 pause sync: PAUSED (saved timescale={:.4f}, wrote 0)", savedTimescale);
                 }
                 else
                 {
                     ts->current.value = savedTimescale;
+                    LOG_DEBUG("t4 pause sync: UNPAUSED (restored timescale to {:.4f})", savedTimescale);
                 }
             });
         }
@@ -361,300 +311,6 @@ namespace IWXMVM::T4
                 Patches::GetGamePatches().IN_Frame.Revert();
         }
 
-        struct RtPair { std::uint32_t va; std::uint32_t value; };
-
-        // SEH-only POD helper for pass-1 scan (no C++ objects so __try works).
-        // Caller pre-allocates buffer + passes capacity.
-        static int RealtimeScanRegionSEH(std::uintptr_t region_base, std::uintptr_t region_end,
-                                         RtPair* buf, int buf_size, int& cursor)
-        {
-            __try
-            {
-                for (std::uintptr_t va = region_base; va + 4 <= region_end && cursor < buf_size; va += 4)
-                {
-                    const std::uint32_t v = *reinterpret_cast<const std::uint32_t*>(va);
-                    if (v >= 5000 && v <= 10'000'000)
-                    {
-                        buf[cursor].va = (std::uint32_t)va;
-                        buf[cursor].value = v;
-                        ++cursor;
-                    }
-                }
-                return 0;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                return 1;
-            }
-        }
-
-        // SEH-only POD helper for pass-2 single-value read.
-        static int RealtimeReadSEH(std::uintptr_t va, std::uint32_t& out)
-        {
-            __try { out = *reinterpret_cast<const std::uint32_t*>(va); return 0; }
-            __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
-        }
-
-        // One-shot live-process diagnostic: hunt clientActive_s base via
-        // VirtualQuery walk + multi-field fingerprint. Runs SEH-guarded so a
-        // bad read past a committed-region edge can't crash the game. Results
-        // (candidate bases + matching field values) go to IWXMVM.log.
-        struct CaScanRawResult
-        {
-            std::uint32_t base_va;
-            std::uint32_t cst;       // value at offset 0x20F8
-            std::uint32_t ost;       // value at offset 0x20FC
-            std::uint32_t ofst;      // value at offset 0x2100
-            std::int32_t  std_delta; // value at offset 0x2104
-            std::uint32_t ossnap;    // value at offset 0x2108
-            std::uint32_t es;        // value at offset 0x210C
-            std::uint32_t newSnap;   // value at offset 0x2110
-        };
-
-        static int ScanCaRegionSEH(const std::uint8_t* region_base, size_t region_size,
-                                   CaScanRawResult* out_hits, int max_hits,
-                                   std::uint32_t demoStart, std::uint32_t demoEnd)
-        {
-            int n_hits = 0;
-            __try
-            {
-                // Need enough headroom for the deepest read (offset 0x2110).
-                if (region_size < 0x2200) return 0;
-                size_t end = region_size - 0x2200;
-                for (size_t off = 0; off <= end && n_hits < max_hits; off += 4)
-                {
-                    const std::uint8_t* p = region_base + off;
-                    // Relaxed fingerprint — focus on the time fields which are
-                    // best-anchored to clientActive_s offsets per T4SP-Server-Plugin
-                    // asserts. snap.valid/snapFlags are weak indicators because
-                    // T4 MP may use different values or our snap offset might be
-                    // wrong.
-                    //   p[0x20F4] (alwaysFalse): must be 0
-                    // Drop alwaysFalse check (offset 0x20F4 might not be alwaysFalse
-                    // in T4 MP — T4SP-Server-Plugin asserts may not apply). Keep the
-                    // hard-to-fake constraints: cl.serverTime is plausible; serverTimeDelta
-                    // is small SIGNED int (kills pointer-table noise); time fields form
-                    // a small cluster around cl.serverTime; newSnapshots is 0..3.
-                    std::uint32_t cst = *(const std::uint32_t*)(p + 0x20F8);
-                    // Strong filter: cst MUST be within the demo's tick range
-                    // (it's the current playhead position in server-time units).
-                    if (cst < demoStart || cst > demoEnd + 5000) continue;
-                    int std_delta = (int)*(const std::uint32_t*)(p + 0x2104);
-                    if (std_delta < -100000 || std_delta > 100000) continue;
-                    std::uint32_t ost = *(const std::uint32_t*)(p + 0x20FC);
-                    if (ost == 0) continue;
-                    int dos = (int)ost - (int)cst;
-                    if (dos < -1000 || dos > 1000) continue;
-                    std::uint32_t ofst = *(const std::uint32_t*)(p + 0x2100);
-                    if (ofst == 0) continue;
-                    int dofst = (int)ofst - (int)cst;
-                    if (dofst < -1000 || dofst > 1000) continue;
-                    std::uint32_t ossnap = *(const std::uint32_t*)(p + 0x2108);
-                    if (ossnap == 0) continue;
-                    int dosnap = (int)ossnap - (int)cst;
-                    if (dosnap < -2000 || dosnap > 2000) continue;
-                    std::uint32_t newSnap = *(const std::uint32_t*)(p + 0x2110);
-                    if (newSnap > 3) continue;
-                    std::uint32_t es = *(const std::uint32_t*)(p + 0x210C);
-                    out_hits[n_hits].base_va = (std::uint32_t)(uintptr_t)p;
-                    out_hits[n_hits].cst = cst;
-                    out_hits[n_hits].ost = ost;
-                    out_hits[n_hits].ofst = ofst;
-                    out_hits[n_hits].std_delta = std_delta;
-                    out_hits[n_hits].ossnap = ossnap;
-                    out_hits[n_hits].es = es;
-                    out_hits[n_hits].newSnap = newSnap;
-                    ++n_hits;
-                }
-                return n_hits;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                return n_hits;
-            }
-        }
-
-        // Simple value-scan: find every 32-bit value in BSS that's in [lo, hi].
-        // Bucket by 64KB page. The page with the most hits likely contains
-        // serverTime + related fields = clientActive_s neighborhood.
-        struct ValueHit
-        {
-            std::uint32_t va;
-            std::uint32_t value;
-        };
-
-        static int ScanForServerTimeValuesSEH(const std::uint8_t* region_base, size_t region_size,
-                                              std::uint32_t lo, std::uint32_t hi,
-                                              ValueHit* out_hits, int max_hits)
-        {
-            int n = 0;
-            __try
-            {
-                size_t end = region_size < 4 ? 0 : region_size - 4;
-                for (size_t off = 0; off <= end && n < max_hits; off += 4)
-                {
-                    std::uint32_t v = *(const std::uint32_t*)(region_base + off);
-                    if (v >= lo && v <= hi)
-                    {
-                        out_hits[n].va = (std::uint32_t)(uintptr_t)(region_base + off);
-                        out_hits[n].value = v;
-                        ++n;
-                    }
-                }
-                return n;
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER)
-            {
-                return n;
-            }
-        }
-
-        static void HuntClientActiveOnce()
-        {
-            // Get demo bounds from DemoParser — these were computed in PostDemoLoad.
-            // cl.serverTime MUST be within [demoStart, demoEnd] during playback.
-            auto [demoStart, demoEnd] = DemoParser::GetDemoTickRange();
-            if (demoStart == 0 || demoEnd == 0 || demoEnd <= demoStart)
-            {
-                LOG_WARN("clientActive hunt: DemoParser hasn't determined bounds yet (start={}, end={}); skipping",
-                         demoStart, demoEnd);
-                return;
-            }
-            // Widen by ~10 seconds in case serverTime is slightly outside parsed bounds
-            const std::uint32_t lo = demoStart > 10000 ? demoStart - 10000 : 0;
-            const std::uint32_t hi = demoEnd + 10000;
-            LOG_INFO("clientActive hunt: searching BSS for any uint32 in [{}..{}] (demo bounds widened)",
-                     lo, hi);
-
-            // Value-only scan
-            constexpr int MAX_VALUE_HITS = 2048;
-            static ValueHit value_hits[MAX_VALUE_HITS];
-            int total_value_hits = 0;
-            {
-                std::uintptr_t addr = 0x01000000;
-                constexpr std::uintptr_t SCAN_HI = 0x05000000;
-                while (addr < SCAN_HI && total_value_hits < MAX_VALUE_HITS)
-                {
-                    MEMORY_BASIC_INFORMATION mbi{};
-                    if (::VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0)
-                    {
-                        addr += 0x1000;
-                        continue;
-                    }
-                    std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-                    if (mbi.State == MEM_COMMIT &&
-                        (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0 &&
-                        (mbi.Protect & PAGE_GUARD) == 0)
-                    {
-                        std::uintptr_t scan_start = std::max(addr, reinterpret_cast<std::uintptr_t>(mbi.BaseAddress));
-                        std::uintptr_t scan_end = std::min(region_end, SCAN_HI);
-                        if (scan_end > scan_start)
-                        {
-                            int got = ScanForServerTimeValuesSEH(
-                                reinterpret_cast<const std::uint8_t*>(scan_start),
-                                scan_end - scan_start, lo, hi,
-                                value_hits + total_value_hits, MAX_VALUE_HITS - total_value_hits);
-                            total_value_hits += got;
-                        }
-                    }
-                    addr = region_end > addr ? region_end : addr + 0x1000;
-                }
-            }
-            LOG_INFO("clientActive hunt: found {} uint32 values in demo range", total_value_hits);
-
-            // Cluster by 64KB page
-            std::map<std::uint32_t, int> page_counts;
-            for (int i = 0; i < total_value_hits; ++i)
-                page_counts[value_hits[i].va & ~0xFFFF]++;
-            std::vector<std::pair<std::uint32_t, int>> ranked(page_counts.begin(), page_counts.end());
-            std::sort(ranked.begin(), ranked.end(),
-                      [](const auto& a, const auto& b) { return a.second > b.second; });
-            LOG_INFO("clientActive hunt: top pages by demo-time-value density:");
-            for (int i = 0; i < (int)ranked.size() && i < 10; ++i)
-            {
-                LOG_INFO("  page=0x{:08X}  hits={}", ranked[i].first, ranked[i].second);
-            }
-            // Print all hits within the TOP page (probable clientActive_s neighborhood).
-            // Show offset within page so we can identify cl.serverTime's field offset.
-            if (!ranked.empty())
-            {
-                std::uint32_t top_page = ranked[0].first;
-                LOG_INFO("clientActive hunt: ALL hits in top page 0x{:08X} (offset within page -> value):", top_page);
-                int printed = 0;
-                for (int i = 0; i < total_value_hits && printed < 250; ++i)
-                {
-                    if ((value_hits[i].va & ~0xFFFF) != top_page) continue;
-                    std::uint32_t offset = value_hits[i].va & 0xFFFF;
-                    LOG_INFO("  +0x{:04X} (0x{:08X}) = {}", offset, value_hits[i].va, value_hits[i].value);
-                    ++printed;
-                }
-                // Also dump the second page just in case it's part of the same struct
-                if (ranked.size() > 1)
-                {
-                    std::uint32_t p2 = ranked[1].first;
-                    LOG_INFO("clientActive hunt: hits in 2nd-best page 0x{:08X}:", p2);
-                    printed = 0;
-                    for (int i = 0; i < total_value_hits && printed < 100; ++i)
-                    {
-                        if ((value_hits[i].va & ~0xFFFF) != p2) continue;
-                        std::uint32_t offset = value_hits[i].va & 0xFFFF;
-                        LOG_INFO("  +0x{:04X} (0x{:08X}) = {}", offset, value_hits[i].va, value_hits[i].value);
-                        ++printed;
-                    }
-                }
-            }
-            return;
-
-            constexpr int MAX_HITS = 32;
-            CaScanRawResult hits[MAX_HITS] = {};
-            int total = 0;
-            constexpr std::uintptr_t SCAN_LO = 0x01000000;
-            constexpr std::uintptr_t SCAN_HI = 0x05000000;
-            std::uintptr_t addr = SCAN_LO;
-            int regions_scanned = 0;
-            int regions_skipped = 0;
-            while (addr < SCAN_HI && total < MAX_HITS)
-            {
-                MEMORY_BASIC_INFORMATION mbi{};
-                if (::VirtualQuery(reinterpret_cast<void*>(addr), &mbi, sizeof(mbi)) == 0)
-                {
-                    addr += 0x1000;
-                    continue;
-                }
-                std::uintptr_t region_end = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-                if (mbi.State == MEM_COMMIT &&
-                    (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0 &&
-                    (mbi.Protect & PAGE_GUARD) == 0)
-                {
-                    std::uintptr_t scan_start = std::max(addr, (std::uintptr_t)reinterpret_cast<std::uintptr_t>(mbi.BaseAddress));
-                    std::uintptr_t scan_end = std::min(region_end, SCAN_HI);
-                    if (scan_end > scan_start)
-                    {
-                        int got = ScanCaRegionSEH(
-                            reinterpret_cast<const std::uint8_t*>(scan_start),
-                            scan_end - scan_start,
-                            hits + total, MAX_HITS - total,
-                            demoStart, demoEnd);
-                        total += got;
-                        ++regions_scanned;
-                    }
-                }
-                else
-                {
-                    ++regions_skipped;
-                }
-                addr = region_end > addr ? region_end : addr + 0x1000;
-            }
-            LOG_INFO("clientActive hunt: scanned {} regions, skipped {}, found {} candidates",
-                     regions_scanned, regions_skipped, total);
-            for (int i = 0; i < total; ++i)
-            {
-                const auto& h = hits[i];
-                LOG_INFO("  candidate[{}] base=0x{:08X}  cst={}  ost={}  ofst={}  delta={}  ossnap={}  es={}  newSnap={}",
-                         i, h.base_va, h.cst, h.ost, h.ofst, h.std_delta, h.ossnap, h.es, h.newSnap);
-            }
-        }
-
         Types::GameState GetGameState() final
         {
             const auto addr = GetGameAddresses().clientConnection();
@@ -672,7 +328,13 @@ namespace IWXMVM::T4
 
         Types::Features GetSupportedFeatures() final
         {
-            return Types::Features_ChangeAnimations;
+            // T4 port 2026-05-24: cls.realtime is wired (0x00BD3628 via
+            // clientStatic + offset 0x118) so SkipDemoForward works without
+            // any FS_Read or SV_Frame infrastructure. Enable forward-scrub
+            // via Features_SkipForwardOnly. RewindBy still gated off until
+            // FS_Read + snapshot machinery lands.
+            return (Types::Features)(Types::Features_ChangeAnimations |
+                                     Types::Features_SkipForwardOnly);
         }
 
         void InitializeGameAddresses() final
@@ -699,6 +361,33 @@ namespace IWXMVM::T4
         // body that reads servername + serverTime from engine state.
         std::string lastDemoStem;
         std::filesystem::path lastDemoPath;
+
+        // Backward-seek-via-restart state. When SeekBackward is called, we
+        // store the target tick here, restart the demo, and the OnFrame
+        // listener installed in SetupEventListeners catches the post-restart
+        // tick (when gameTick resets near 0) and calls SkipDemoForward to
+        // reach the target.
+        std::int32_t pendingSkipForwardTarget = -1;
+
+        void SeekBackward(std::int32_t deltaTicks) final
+        {
+            // Compute absolute target tick (clamp to 0 if too far back).
+            auto demoInfo = GetDemoInfo();
+            std::int32_t target = static_cast<std::int32_t>(demoInfo.gameTick) + deltaTicks;
+            if (target < 0) target = 0;
+            pendingSkipForwardTarget = target;
+
+            LOG_INFO("SeekBackward: delta={} curTick={} target={} — restarting demo",
+                     deltaTicks, demoInfo.gameTick, target);
+
+            if (lastDemoPath.empty())
+            {
+                LOG_WARN("SeekBackward: no lastDemoPath stored, cannot restart");
+                pendingSkipForwardTarget = -1;
+                return;
+            }
+            PlayDemo(lastDemoPath);
+        }
 
         Types::DemoInfo GetDemoInfo() final
         {
@@ -733,8 +422,6 @@ namespace IWXMVM::T4
             ++frame_counter;
             if (frame_counter % 60 == 0 && cl_serverTime != last_logged)
             {
-                LOG_DEBUG("cl.serverTime probe: [0x{:08X}] = {} (gameTick={}, endTick={})",
-                          CL_SERVERTIME_VA, cl_serverTime, demoInfo.gameTick, demoInfo.endTick);
                 last_logged = cl_serverTime;
             }
 
@@ -1145,15 +832,29 @@ namespace IWXMVM::T4
 
             auto entities = Structures::GetEntities();
             auto entity = &entities[entityId];
-            auto boneName = Functions::SL_GetStringOfSize(name.c_str(), 1, name.size() + 1);
+            // T4 MP SL_GetStringOfSize is 4-arg: (inst, string, user, len).
+            // inst=0 = server-side script instance (default for engine code).
+            auto boneName = Functions::SL_GetStringOfSize(
+                0, name.c_str(), 1, static_cast<unsigned int>(name.size() + 1));
 
-            const auto orgTimeStamp = std::exchange(dobj->skel.timeStamp, Structures::GetClientActive()->skelTimeStamp);
+            // T4 port 2026-05-24: SKIP the timestamp swap. IW3 forces
+            // bone recomputation by overwriting dobj->skel.timeStamp with
+            // clientActive.skelTimeStamp. In T4 we don't have the right
+            // clientActive offset for skelTimeStamp yet (it's a placeholder
+            // reading garbage), so the swap was setting dobj's timestamp to
+            // a wrong value and causing T4's CG_DObjGetWorldBoneMatrix to
+            // return STALE cached bones (likely from entity spawn position
+            // — making camera appear under the map). Letting dobj keep its
+            // engine-maintained timestamp lets the function use the correct
+            // current bones.
 
             auto boneIndex = FindBoneIndex(dobj, boneName);
             if (boneIndex == -1)
             {
-                // LOG_ERROR("Bone {0} was not found in {1} models", boneName, (int)dobj->numModels);
-                dobj->skel.timeStamp = orgTimeStamp;
+                static int log_ct = 0;
+                if (++log_ct < 5)
+                    LOG_INFO("GetBoneData: bone='{}' (token={}) NOT FOUND in {} models (dobj idx={}, dobj@{})",
+                             name, boneName, (int)dobj->numModels, dobjIndex, (void*)dobj);
                 return {.id = -1};
             }
 
@@ -1161,10 +862,12 @@ namespace IWXMVM::T4
             float origin[3];
             auto result = Functions::CG_DObjGetWorldBoneMatrix(entity, boneIndex, (float*)rotationMatrix, dobj, origin);
 
-            dobj->skel.timeStamp = orgTimeStamp;
             if (!result)
             {
-                LOG_ERROR("Call to CG_DObjGetWorldTagMatrix failed");
+                static int log_ct = 0;
+                if (++log_ct < 5)
+                    LOG_INFO("GetBoneData: CG_DObjGetWorldBoneMatrix returned false (bone='{}' idx={})",
+                             name, boneIndex);
                 return {.id = -1};
             }
 

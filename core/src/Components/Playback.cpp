@@ -13,6 +13,7 @@ namespace IWXMVM::Components::Playback
     void TogglePaused()
     {
         isPlaybackPaused = !isPlaybackPaused;
+        LOG_DEBUG("Playback::TogglePaused -> isPlaybackPaused={}", isPlaybackPaused);
     }
 
     bool IsPaused()
@@ -70,6 +71,14 @@ namespace IWXMVM::Components::Playback
 
     void SkipDemoForward(std::int32_t ticks)
     {
+        // Skip-forward only needs cls.realtime to be wired — no FS_Read
+        // snapshot machinery required. Allow it for bindings that advertise
+        // EITHER Features_Rewinding (full seek/rewind) OR Features_SkipForwardOnly
+        // (forward-scrub only — currently t4 while FS_Read is unidentified).
+        const auto feats = Mod::GetGameInterface()->GetSupportedFeatures();
+        if (!(feats & (Types::Features_Rewinding | Types::Features_SkipForwardOnly)))
+            return;
+
         auto addresses = Mod::GetGameInterface()->GetPlaybackDataAddresses();
         auto realtime = reinterpret_cast<int32_t*>(addresses.cls.realtime);
         *realtime = *realtime + ticks;
@@ -78,10 +87,20 @@ namespace IWXMVM::Components::Playback
 
     void SetTickDelta(int32_t value, bool ignoreDeadzone)
     {
+        const auto feats = Mod::GetGameInterface()->GetSupportedFeatures();
+
         if (value > 0)
-            SkipForward(value);
+        {
+            if (feats & (Types::Features_Rewinding | Types::Features_SkipForwardOnly))
+                SkipForward(value);
+        }
         else if ((value < -REWIND_DEADZONE) || (value < 0 && ignoreDeadzone))
-            Rewinding::RewindBy(value);
+        {
+            if (feats & Types::Features_Rewinding)
+                Rewinding::RewindBy(value);
+            else if (feats & Types::Features_SkipForwardOnly)
+                Mod::GetGameInterface()->SeekBackward(value);  // fallback: restart + fast-forward
+        }
     }
 
     void HandleImportedFrozenTickLogic(std::optional<std::uint32_t> importedFrozenTick)

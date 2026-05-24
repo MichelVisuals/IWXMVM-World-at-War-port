@@ -85,19 +85,29 @@ namespace IWXMVM::T4::Structures
         netProfileInfo_t prof;
     };
 
+    // T4 (CoDWaWmp.exe) clientStatic_t — derived 2026-05-23 session 4.
+    // Caball009 gives us cls.realtime at VA 0xBD3628 + cls.realFrametime at
+    // 0xBD362C. In the IW3 clientStatic_t layout, realtime is at offset
+    // 0x118 with realFrametime immediately after at 0x11C. So:
+    //   base = 0xBD3628 - 0x118 = 0xBD3510
+    // The first 0x118 bytes (quit / hunkUsersStarted / servername / etc.)
+    // likely follow IW3 layout, but to be safe we use a byte-pad prefix
+    // and only expose the verified fields. static_asserts pin the offsets.
     struct clientStatic_t
     {
-        int quit;
-        int hunkUsersStarted;
-        char servername[256];
-        int rendererStarted;
-        int soundStarted;
-        int uiStarted;
-        int frametime;
-        int realtime;
-        int realFrametime;
-        // ...
+        byte _t4_pad_prefix[0x118];          // 0x000..0x117  prefix (servername etc.)
+        int realtime;                        // 0x118 ✅
+        int realFrametime;                   // 0x11C ✅
+        // Beyond this point, fields are at unverified T4 offsets. Rewind
+        // state machine only reads/writes realtime (and indirectly via
+        // PlaybackData address pointer), so leaving the tail opaque is
+        // safe for now.
+        byte _t4_pad_tail[0x500];            // tail slack
     };
+    static_assert(offsetof(clientStatic_t, realtime) == 0x118,
+                  "T4 clientStatic_t.realtime must be at +0x118 (so 0xBD3628 from base 0xBD3510)");
+    static_assert(offsetof(clientStatic_t, realFrametime) == 0x11C,
+                  "T4 clientStatic_t.realFrametime must be at +0x11C");
 
     struct clientConnection_t
     {
@@ -345,39 +355,62 @@ namespace IWXMVM::T4::Structures
         hudelements_s hud;
     };
 
+    // T4 (CoDWaWmp.exe) layout — verified 2026-05-23 via EAX-capture probe
+    // against live refdef at 0x009E676C. Differs from IW3 by an inserted
+    // 4-byte field between tanHalfFovY (+0x14) and vieworg (which sits at
+    // +0x1C in T4, not IW3's +0x18). The stored_fov field reads a constant
+    // 65.0 during playback — almost certainly a cached cg_fov value in
+    // degrees, refreshed each frame by R_SetViewParmsForScene.
+    //
+    // All offsets confirmed in IWXMVM.log:
+    //   +0x00 x/y/w/h = 0/0/2560/1440 (live screen res)
+    //   +0x10 tanHalfFovX = 0.8494 (≈ atan 40.4° half = 80.8° full)
+    //   +0x14 tanHalfFovY = 0.4778
+    //   +0x18 stored_fov  = 65.00 constant
+    //   +0x1C vieworg     = (-9266, -16957, 130) → moves smoothly w/ player
+    //   +0x2C viewaxis    (per Ghidra; not yet probe-confirmed in T4 MP — 4-byte
+    //                       gap at +0x28 may be pad or a 4th vieworg float)
     struct refdef_s
     {
-        unsigned int x;
-        unsigned int y;
-        unsigned int width;
-        unsigned int height;
-        float tanHalfFovX;
-        float tanHalfFovY;
-        float vieworg[3];
-        float viewaxis[3][3];
-        float viewOffset[3];
-        int time;
-        float zNear;
-        float blurRadius;
-        byte filler[0x4038];
+        unsigned int x;          // 0x00
+        unsigned int y;          // 0x04
+        unsigned int width;      // 0x08
+        unsigned int height;     // 0x0C
+        float tanHalfFovX;       // 0x10
+        float tanHalfFovY;       // 0x14
+        float stored_fov;        // 0x18  — T4-specific (cg_fov in degrees)
+        float vieworg[3];        // 0x1C
+        float _t4_pad28;         // 0x28  — vec3-to-vec4 alignment or pad; verify
+        float viewaxis[3][3];    // 0x2C  — per Ghidra
+        float viewOffset[3];     // 0x50
+        int time;                // 0x5C
+        float zNear;             // 0x60
+        float blurRadius;        // 0x64
+        byte filler[0x4030];     // pad to original IW3 sizeof
     };
+    static_assert(offsetof(refdef_s, vieworg) == 0x1C,
+                  "T4 refdef_s.vieworg must be at offset 0x1C — verified via R_SetViewParmsForScene EAX capture 2026-05-23");
+    static_assert(offsetof(refdef_s, viewaxis) == 0x2C,
+                  "T4 refdef_s.viewaxis must be at offset 0x2C — per Ghidra R_SetViewParmsForScene disassembly");
 
+    // T4 (CoDWaWmp.exe) layout — total sizeof MUST be 0x39E0 (14816) per
+    // Caball009's working MP demo-rewind PoC (32 of these live at
+    // clientActive_s+0x6B33C, spaced exactly 0x39E0 apart). The first three
+    // fields (valid, snapFlags, serverTime) are at standard CoD-engine
+    // offsets 0x00/0x04/0x08; the rest of the struct (playerState_s,
+    // numEntities, parseEntitiesNum, etc.) has unverified T4 offsets so
+    // we represent it as an opaque buffer. The Rewinding state machine
+    // only memcpys the snapshot ring whole, so field-level access past
+    // serverTime isn't needed.
     struct clSnapshot_t
     {
-        int valid;
-        int snapFlags;
-        int serverTime;
-        int messageNum;
-        int deltaNum;
-        int ping;
-        int cmdNum;
-        playerState_s ps;
-        int numEntities;
-        int numClients;
-        int parseEntitiesNum;
-        int parseClientsNum;
-        int serverCommandNum;
+        int valid;       // 0x00
+        int snapFlags;   // 0x04
+        int serverTime;  // 0x08
+        byte _t4_opaque[0x39E0 - 0xC];  // 0x0C..0x39DF
     };
+    static_assert(sizeof(clSnapshot_t) == 0x39E0,
+                  "T4 clSnapshot_t must be exactly 0x39E0 (14816) bytes per Caball009");
 
     struct gameState_t
     {
@@ -683,64 +716,90 @@ namespace IWXMVM::T4::Structures
         int attachedVehSlotIndex;
     };
 
+    // T4 (CoDWaWmp.exe) layout — reshape 2026-05-23 session 4 (cycle A of
+    // FS_Read seek work). Verified offsets all sourced from Caball009's
+    // working MP demo-rewind PoC (refs/rewind_caball009/) plus our own
+    // per-frame caball-probe data. Fields whose T4 offsets are not yet
+    // known are represented as named byte-pads; consumers of those fields
+    // read garbage but the struct compiles cleanly.
+    //
+    // Verified offsets in T4 MP (clientActive_s base at 0x00F44780):
+    //   +0x00118  cl.snap.serverTime
+    //   +0x03AF4  cl.serverTime              (== mirror at 0x01F00DD0)
+    //   +0x03AF8  cl.oldServerTime
+    //   +0x03AFC  cl.oldFrameServerTime
+    //   +0x03B00  cl.serverTimeDelta         (= serverTime - cls.realtime)
+    //   +0x03B10  gameState                  (143300 bytes per Caball009 —
+    //                                          larger than IW3's 0x2262C)
+    //   +0x26B14  cl.parseEntitiesNum
+    //   +0x26B18  cl.parseClientsNum
+    //   +0x6B33C  cl.snapshots[32]           (each 14816 = 0x39E0 bytes)
+    //
+    // Fields with unknown T4 offsets (live at wrong addresses, accessed
+    // from GetBoneData / camera code etc.): skelTimeStamp, mapname,
+    // cgameOrigin, viewangles, etc. Marked with `// TBD` below. Those
+    // features (bone-camera, cgame-predicted-data) won't work correctly
+    // until the offsets are reverse-engineered.
     struct clientActive_t
     {
-        bool usingAds;
-        int timeoutcount;
-        clSnapshot_t snap;
-        bool alwaysFalse;
-        int serverTime;
-        int oldServerTime;
-        int oldFrameServerTime;
-        int serverTimeDelta;
-        int oldSnapServerTime;
-        int extrapolatedSnapshot;
-        int newSnapshots;
-        gameState_t gameState;
-        char mapname[64];
-        int parseEntitiesNum;
-        int parseClientsNum;
-        int mouseDx[2];
-        int mouseDy[2];
-        int mouseIndex;
-        bool stanceHeld;
-        StanceState stance;
-        StanceState stancePosition;
-        int stanceTime;
-        int cgameUserCmdWeapon;
-        int cgameUserCmdOffHandIndex;
-        float cgameFOVSensitivityScale;
-        float cgameMaxPitchSpeed;
-        float cgameMaxYawSpeed;
-        float cgameKickAngles[3];
-        float cgameOrigin[3];
-        float cgameVelocity[3];
-        float cgameViewangles[3];
-        int cgameBobCycle;
-        int cgameMovementDir;
-        int cgameExtraButtons;
-        int cgamePredictedDataServerTime;
-        float viewangles[3];
-        int serverId;
-        int skelTimeStamp;
-        volatile int skelMemPos;
-        char skelMemory[262144];
-        char* skelMemoryStart;
-        bool allowedAllocSkel;
-        __declspec(align(4)) usercmd_s cmds[128];
-        int cmdNumber;
-        ClientArchiveData clientArchive[256];
-        int clientArchiveIndex;
-        outPacket_t outPackets[32];
-        clSnapshot_t snapshots[32];
-        entityState_s entityBaselines[1024];
-        entityState_s parseEntities[2048];
-        clientState_s parseClients[2048];
-        int corruptedTranslationFile;
-        char translationVersion[256];
-        float vehicleViewYaw;
-        float vehicleViewPitch;
+        byte _t4_pad_prefix[0x110];                  // 0x0000..0x010F  unknown
+        clSnapshot_t snap;                           // 0x0110  snap.serverTime @ +0x118 ✅
+        // After snap (0x0110 + sizeof(clSnapshot_t) = end-of-snap)
+        // sizeof(clSnapshot_t) MUST be 0x39E0 in T4 per Caball009; if our
+        // bundled struct differs, the static_assert below will fail and
+        // we'll need to pad inside clSnapshot_t.
+        bool alwaysFalse;                            // 0x3AF0
+        char _t4_pad_post_alwaysFalse[3];            // 0x3AF1..0x3AF3
+        int serverTime;                              // 0x3AF4 ✅
+        int oldServerTime;                           // 0x3AF8 ✅
+        int oldFrameServerTime;                      // 0x3AFC ✅
+        int serverTimeDelta;                         // 0x3B00 ✅
+        int oldSnapServerTime;                       // 0x3B04
+        int extrapolatedSnapshot;                    // 0x3B08
+        int newSnapshots;                            // 0x3B0C
+        // T4 gameState size differs from IW3 (143300 vs 0x2262C). Treated
+        // as opaque buffer — Rewinding state machine memcpys it whole; no
+        // field-level access needed from us. Original gameState_t struct
+        // is no longer applicable to T4 clientActive_t.
+        byte gameState[143300];                      // 0x3B10..0x26AD3 ✅
+        byte _t4_pad_pre_parseEntities[0x40];        // 0x26AD4..0x26B13
+        int parseEntitiesNum;                        // 0x26B14 ✅
+        int parseClientsNum;                         // 0x26B18 ✅
+        byte _t4_pad_to_snapshots[0x44820];          // 0x26B1C..0x6B33B
+        clSnapshot_t snapshots[32];                  // 0x6B33C ✅
+        // After snapshots[32] = 0x6B33C + 32*0x39E0 = 0xB7BBC.
+        // Remaining T4 fields (skelTimeStamp, skelMemory, cmds[],
+        // clientArchive[], outPackets[], entityBaselines[], parseEntities[],
+        // parseClients[], mapname, cgameOrigin, viewangles, etc.) have
+        // unknown T4 offsets. Provide a tail block + placeholder fields
+        // that the existing iw3-derived T4Interface code references — the
+        // placeholders will read garbage but at least compile.
+        byte _t4_pad_post_snapshots[0x80000];        // 512K of tail slack
+
+        // BELOW HERE: offsets are WRONG for T4 (placeholders to keep code
+        // compiling). DO NOT rely on these reads producing real values.
+        // To be relocated once each field's T4 offset is verified.
+        int skelTimeStamp;                           // TBD — placeholder
+        char mapname[64];                            // TBD — placeholder
     };
+    static_assert(offsetof(clientActive_t, snap) == 0x110,
+                  "T4 clientActive_t.snap must be at +0x110 (so snap.serverTime lands at +0x118)");
+    static_assert(offsetof(clSnapshot_t, serverTime) == 0x8,
+                  "clSnapshot_t.serverTime must be at +0x8 (CoD-engine layout)");
+    static_assert(sizeof(clSnapshot_t) == 0x39E0,
+                  "T4 clSnapshot_t must be 0x39E0 (14816) bytes per Caball009 — pad playerState_s if this fails");
+    static_assert(offsetof(clientActive_t, serverTime) == 0x3AF4,
+                  "T4 clientActive_t.serverTime must be at +0x3AF4");
+    static_assert(offsetof(clientActive_t, serverTimeDelta) == 0x3B00,
+                  "T4 clientActive_t.serverTimeDelta must be at +0x3B00");
+    static_assert(offsetof(clientActive_t, gameState) == 0x3B10,
+                  "T4 clientActive_t.gameState must be at +0x3B10");
+    static_assert(offsetof(clientActive_t, parseEntitiesNum) == 0x26B14,
+                  "T4 clientActive_t.parseEntitiesNum must be at +0x26B14");
+    static_assert(offsetof(clientActive_t, parseClientsNum) == 0x26B18,
+                  "T4 clientActive_t.parseClientsNum must be at +0x26B18");
+    static_assert(offsetof(clientActive_t, snapshots) == 0x6B33C,
+                  "T4 clientActive_t.snapshots must be at +0x6B33C");
 
     struct XModel
     {
@@ -769,19 +828,29 @@ namespace IWXMVM::T4::Structures
 
     struct DObj_s
     {
-        void* tree;  // XAnimTree_s*
-        unsigned __int16 duplicateParts;
-        unsigned __int16 entnum;
-        char duplicatePartsSize;
-        char numModels;
-        char numBones;
-        unsigned int ignoreCollision;
-        volatile int locked;
-        DSkel skel;
-        float radius;
-        unsigned int hidePartBits[4];
-        XModel** models;  // XModel**
+        void* tree;                       // +0x00  XAnimTree_s*
+        unsigned __int16 duplicateParts;  // +0x04
+        unsigned __int16 entnum;          // +0x06
+        char duplicatePartsSize;          // +0x08
+        char numModels;                   // +0x09
+        char numBones;                    // +0x0A
+        unsigned int ignoreCollision;     // +0x0C
+        volatile int locked;              // +0x10
+        DSkel skel;                       // +0x14  (size 0x38)
+        float radius;                     // +0x4C
+        unsigned int hidePartBits[4];     // +0x50  (size 0x10)
+        // T4-specific block 2026-05-24 per T4SP-Server-Plugin/structs.hpp:5129.
+        // IW3 had models** at +0x60; T4 inserts 4 bytes here pushing models
+        // to +0x64. Bonecam reads models as garbage without this pad.
+        char localClientIndex;            // +0x60
+        unsigned char flags;              // +0x61
+        unsigned __int16 ikStateIndex;    // +0x62
+        XModel** models;                  // +0x64  XModel**
     };
+    static_assert(sizeof(DObj_s) == 0x68,
+                  "T4 DObj_s must be 0x68 (104) bytes per T4SP-Server-Plugin");
+    static_assert(offsetof(DObj_s, models) == 0x64,
+                  "T4 DObj_s.models must be at +0x64");
 
     struct cgs_t
     {
@@ -886,7 +955,17 @@ namespace IWXMVM::T4::Structures
         int miscTime;
         float lightingOrigin[3];
         void* tree; // XAnimTree_s
+        // T4 port 2026-05-24: T4SP-Server-Plugin documents sizeof(centity_s)
+        // = 0x304 (772 bytes). Our IW3-derived fields above sum to ~476 bytes,
+        // so we'd index by wrong stride when reading cg_entities[i]. Pad to
+        // the verified T4 size so array indexing matches reality. Inner-field
+        // offsets are still IW3-style (some may read garbage) — but the
+        // entity-POINTER passed into T4's CG_DObjGetWorldBoneMatrix lands at
+        // the right slot, which is what bonecam needs.
+        byte _t4_pad_end[0x304 - 476];
     };
+    static_assert(sizeof(centity_s) == 0x304,
+                  "T4 centity_s must be 0x304 (772) bytes per T4SP-Server-Plugin");
 
     struct score_t
     {
@@ -1588,4 +1667,5 @@ namespace IWXMVM::T4::Structures
     centity_s* GetEntities();
     uint16_t* GetClientObjectMap();
     DObj_s* GetObjBuf();
+    refdef_s* GetRefdef();
 }  // namespace IWXMVM::T4::Structures

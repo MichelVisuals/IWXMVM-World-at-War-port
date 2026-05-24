@@ -1,8 +1,16 @@
 #pragma once
 #include "UI/UIComponent.hpp"
+#include <atomic>
 
 namespace IWXMVM::UI
 {
+    // Set to true by GameView::LockMouse exactly across its SetCursorPos call.
+    // Consumed by D3D9.cpp's SetCursorPos hook to differentiate the legitimate
+    // LockMouse caller (which MUST be allowed through for ImGui's MouseDelta
+    // compensation to work) from WaW's IN_Frame re-centering (which must be
+    // suppressed during demos so the cursor stays on the IWXMVM overlay).
+    extern std::atomic<bool> g_setCursorPosFromLockMouse;
+
     class GameView : public UIComponent
     {
        public:
