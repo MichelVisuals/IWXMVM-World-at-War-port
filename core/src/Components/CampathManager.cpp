@@ -66,11 +66,6 @@ namespace IWXMVM::Components
                 {
                     Playback::SetTickDelta(KeyframeManager::Get().GetKeyframes(property).front().tick -
                                                Components::Playback::GetTimelineTick(), true);
-                    // Pause after seeking to first keyframe so user can press
-                    // space to start playback when they're ready. Avoids the
-                    // surprise of the dolly immediately playing on J.
-                    if (!Playback::IsPaused())
-                        Playback::TogglePaused();
                 }
             }
 

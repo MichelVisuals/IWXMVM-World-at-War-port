@@ -15,6 +15,9 @@
 #include "Components/Rewinding.hpp"
 #include "Components/Playback.hpp"
 #include "Components/CaptureManager.hpp"
+#include "Components/CameraManager.hpp"
+#include "Components/Camera.hpp"
+#include "Components/KeyframeManager.hpp"
 
 #include "glm/vec3.hpp"
 #include "glm/gtc/type_ptr.hpp"
@@ -300,6 +303,25 @@ namespace IWXMVM::T4
                     Components::Playback::TogglePaused();
                 }
                 wasCapturing = isCapturing;
+            });
+
+            // t4 dolly auto-pause. When the user presses J (DollyPlayPath),
+            // CampathManager switches camera mode to Dolly and seeks to the
+            // first keyframe — but doesn't pause, so the dolly immediately
+            // starts playing. Originally a 5-line hunk in
+            // core/CampathManager.cpp; moved here to keep core/ 1:1 with
+            // upstream. OnCameraChanged fires synchronously inside
+            // SetActiveCamera (before the seek), but SetTickDelta doesn't
+            // check pause state in t4 so ordering is fine.
+            Events::RegisterListener(EventType::OnCameraChanged, []() {
+                auto& cam = Components::CameraManager::Get().GetActiveCamera();
+                if (!cam || cam->GetMode() != Components::Camera::Mode::Dolly) return;
+                const auto& property = Components::KeyframeManager::Get().GetProperty(
+                    Types::KeyframeablePropertyType::CampathCamera);
+                if (Components::KeyframeManager::Get().GetKeyframes(property).empty()) return;
+                if (Components::Playback::IsPaused()) return;
+                LOG_DEBUG("t4 dolly auto-pause: camera switched to Dolly with keyframes -> pausing");
+                Components::Playback::TogglePaused();
             });
         }
 
