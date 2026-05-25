@@ -210,18 +210,17 @@ namespace IWXMVM::T4::Signatures
         // sits in zero-init BSS in the EXE but holds populated centity_s
         // data during demo playback (slot[0].eType=0x01 = ET_PLAYER).
         HAddr<0x00A90930> cg_entities;
-        // 0x0054E790 — CG_DObjGetWorldBoneMatrix. Identified 2026-05-24 by
-        // prologue-shape sig `83 EC ?? 53 55 56 57 8B F9` (SUB ESP,imm8;
-        // PUSH EBX/EBP/ESI/EDI; MOV EDI, ECX — captures the non-standard
-        // boneIndex-in-ECX ABI). 4 candidates fit the prologue; this one
-        // is the only one with heavy XMM/FP math (171 vector-prefix insns
-        // across 1537 bytes + 15 helper calls) which matches the
-        // quaternion/matrix work CG_DObjGetWorldBoneMatrix is known to do.
-        // Non-standard ABI: entity@<eax>, boneIndex@<ecx>, rotMatrix/dobj/
-        // origin on stack — already encoded in Functions::CG_DObjGetWorldBoneMatrix.
-        // No consumer until bonecam runs (GetBoneData), so wiring is a no-op
-        // runtime change until SL_GetStringOfSize also lands.
-        HAddr<0x0054E790> CG_DObjGetWorldBoneMatrix;
+        // CG_DObjGetWorldBoneMatrix — UNWIRED. Four candidates tried & ruled
+        // out via VEH 2026-05-25 (see project-iwxmvm-bonecam-blocked):
+        //   0x0054E790 — pose interpolator (session-7 prologue-match was bogus)
+        //   0x0054FFE0 — different function, expects EDI=ptr at entry
+        //   0x0074AAF0 — actually DObjGetBoneIndex (helper, takes dobj@ECX)
+        //   0x0074B020 — higher-level animation function (not bone-matrix)
+        // 12 semantic-scan candidates remain (functions reading both
+        // [reg+0x44] and [reg+0x48], plausible size). Bonecam returns
+        // {.id=-1} cleanly while unwired so no crash; UI shows "Bone not
+        // found on entity".
+        HAddr<0> CG_DObjGetWorldBoneMatrix;
         // 0x022D9940 — clientObjMap. Identified 2026-05-24 by IW3 sig
         // `03 44 24 04 0F B7 04 45` (ADD EAX,[ESP+4]; MOVZX EAX, WORD PTR
         // [EAX*2+imm32]) — matched 4 unique caller sites in T4 .text

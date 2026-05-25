@@ -42,6 +42,83 @@ namespace IWXMVM::T4
     inline decltype(&SetCursorPos) g_OriginalSetCursorPos = nullptr;
     inline decltype(&ClipCursor)   g_OriginalClipCursor   = nullptr;
 
+    // Vectored exception handler — fires BEFORE the normal SEH chain runs, so
+    // we capture full register/EIP/faulting-address state at the EXACT moment
+    // an access violation raises. Doesn't HANDLE the exception (returns
+    // EXCEPTION_CONTINUE_SEARCH); just logs and lets normal handling proceed.
+    // Lets us debug crashes inside engine functions (bonecam etc) without an
+    // interactive debugger. Per feedback-t4-port-use-debugger this is a
+    // debugger-substitute for getting equivalent diagnostics into the log.
+    inline std::atomic<int> g_avLogCount{0};
+
+    // __try/__except can't coexist with C++ object destruction in the same
+    // function. Split: this helper has no C++ types so __try is allowed.
+    inline void T4_VEH_SafeProbe(std::uintptr_t eip, std::uintptr_t esp,
+                                 char* insnOut /*[64]*/, std::uintptr_t* retOut)
+    {
+        *retOut = 0;
+        insnOut[0] = 0;
+        __try {
+            auto* p = reinterpret_cast<const volatile std::uint8_t*>(eip);
+            for (int i = 0; i < 16; i++)
+                std::snprintf(insnOut + i * 3, 4, "%02X ", p[i]);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            std::strcpy(insnOut, "<EIP unreadable>");
+        }
+        __try {
+            *retOut = *reinterpret_cast<const volatile std::uintptr_t*>(esp);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    // Known noisy AV sites we DON'T want to log every frame (per VEH session
+    // 2026-05-25). Add EIP values here to suppress them after the first hit.
+    // These are visuals/dvar accesses on unwired T4 dvars — expected behavior,
+    // already handled by T4_SAFE_GET/SET wrappers, not a bug to debug.
+    inline std::atomic<std::uintptr_t> g_lastSuppressedEip{0};
+
+    inline LONG WINAPI T4_VectoredAVHandler(PEXCEPTION_POINTERS exc)
+    {
+        if (!exc || !exc->ExceptionRecord ||
+            exc->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // De-noise: skip if same EIP as last suppressed one (recurring per-
+        // frame AVs from visuals). Lets us see UNIQUE AVs (= the bonecam-
+        // related one we're hunting). Null-EIP secondary unwind crashes
+        // also dropped.
+        const std::uintptr_t eip = exc->ContextRecord ? exc->ContextRecord->Eip : 0;
+        if (eip == 0) return EXCEPTION_CONTINUE_SEARCH;
+        if (eip == g_lastSuppressedEip.load(std::memory_order_relaxed))
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        const int n = g_avLogCount.fetch_add(1, std::memory_order_relaxed);
+        if (n >= 50)
+            return EXCEPTION_CONTINUE_SEARCH;
+        // After logging once, mark this EIP as known-noisy so we don't spam.
+        g_lastSuppressedEip.store(eip, std::memory_order_relaxed);
+
+        const auto& ctx = *exc->ContextRecord;
+        const auto& rec = *exc->ExceptionRecord;
+        const std::uintptr_t faultAddr = rec.NumberParameters >= 2 ? rec.ExceptionInformation[1] : 0;
+        const std::uintptr_t faultOp   = rec.NumberParameters >= 1 ? rec.ExceptionInformation[0] : 0;
+        const char* opStr = faultOp == 0 ? "read" : faultOp == 1 ? "write" : faultOp == 8 ? "exec" : "?";
+
+        char insnBytes[64];
+        std::uintptr_t retAddr = 0;
+        T4_VEH_SafeProbe(ctx.Eip, ctx.Esp, insnBytes, &retAddr);
+
+        LOG_WARN("T4_VEH #{} AV {} EIP=0x{:08X} faultAddr=0x{:08X}  "
+                 "EAX=0x{:08X} ECX=0x{:08X} EDX=0x{:08X} EBX=0x{:08X}  "
+                 "ESI=0x{:08X} EDI=0x{:08X} EBP=0x{:08X} ESP=0x{:08X}  "
+                 "retAddr=0x{:08X}  insn=[{}]",
+                 n, opStr, ctx.Eip, faultAddr,
+                 ctx.Eax, ctx.Ecx, ctx.Edx, ctx.Ebx,
+                 ctx.Esi, ctx.Edi, ctx.Ebp, ctx.Esp,
+                 retAddr, insnBytes);
+
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     // user32 SetCursorPos and ClipCursor are WINAPI (__stdcall). Captureless
     // lambdas decay to __cdecl by default; calling them as stdcall corrupts
     // the stack on RET and crashes the WaW caller. Declare these as proper
@@ -122,6 +199,14 @@ namespace IWXMVM::T4
 
         void InstallHooksAndPatches() final
         {
+            // Install vectored exception handler FIRST — captures register
+            // state on any AV that fires anywhere in the process from now on.
+            // First-call flag = 1 puts us at the FRONT of the chain (before
+            // anyone else's VEH). Returns EXCEPTION_CONTINUE_SEARCH so we
+            // just log; we don't actually handle.
+            ::AddVectoredExceptionHandler(1, &T4_VectoredAVHandler);
+            LOG_INFO("T4 vectored AV handler installed (logs first 30 access violations with register state)");
+
             // core/-cleanup-1:1 fallout: when a render-path listener throws
             // (mostly VisualsMenu's off-screen RenderXxx OnFrame against
             // unwired T4 dvars), upstream UIManager::RunImGuiFrame's catch(...)
@@ -1110,8 +1195,31 @@ namespace IWXMVM::T4
             float rotationMatrix[3 * 4];   // 12 floats per actual signature
             float origin[3];
 
+            // Bonecam call marker — log once per second so we know GetBoneData
+            // is reaching the CG_DObj call. Helps correlate with VEH AV logs
+            // to determine if CG_DObj is throwing or completing cleanly.
+            {
+                static auto last_mark = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+                auto now = std::chrono::steady_clock::now();
+                if (now - last_mark >= std::chrono::seconds(1)) {
+                    last_mark = now;
+                    LOG_INFO("BONECAM_CALL: about to call CG_DObj  bone='{}' idx={} dobj@{} entity@{} mat@{} origin@{}",
+                             name, boneIndex, (void*)dobj, (void*)entity, (void*)rotationMatrix, (void*)origin);
+                }
+            }
+
             auto result = Functions::CG_DObjGetWorldBoneMatrix(
                 entity, boneIndex, (float*)rotationMatrix, dobj, origin);
+
+            {
+                static auto last_mark = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+                auto now = std::chrono::steady_clock::now();
+                if (now - last_mark >= std::chrono::seconds(1)) {
+                    last_mark = now;
+                    LOG_INFO("BONECAM_CALL: returned cleanly result={} origin=[{:.1f},{:.1f},{:.1f}]",
+                             result, origin[0], origin[1], origin[2]);
+                }
+            }
 
             if (!result)
                 return {.id = -1};
