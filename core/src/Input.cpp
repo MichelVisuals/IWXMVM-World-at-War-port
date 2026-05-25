@@ -17,18 +17,12 @@ namespace IWXMVM
 
     bool Input::KeyDown(ImGuiKey key)
     {
-        #define KD_STAGE(tag) do { static bool _l=false; if(!_l){_l=true; LOG_DEBUG("Input::KeyDown stage: " tag);} } while(0)
-        KD_STAGE("K0: enter");
         if (Mod::GetGameInterface()->IsConsoleOpen())
             return false;
-        KD_STAGE("K1: post IsConsoleOpen");
 
         if (IsMouseButton(key))
             return ImGui::IsMouseClicked(mouseButtonMap.at(key));
-        KD_STAGE("K2: pre ImGui::IsKeyPressed");
-        auto r = ImGui::IsKeyPressed(key);
-        KD_STAGE("K3: post ImGui::IsKeyPressed");
-        return r;
+        return ImGui::IsKeyPressed(key);
     }
 
     bool Input::KeyUp(ImGuiKey key)
