@@ -18,12 +18,57 @@
 #include "Components/CameraManager.hpp"
 #include "Components/Camera.hpp"
 #include "Components/KeyframeManager.hpp"
+#include "Utilities/T4HookManager.hpp"
 
 #include "glm/vec3.hpp"
 #include "glm/gtc/type_ptr.hpp"
 
 namespace IWXMVM::T4
 {
+    // Atomic flag read by the user32 SetCursorPos/ClipCursor hooks (installed
+    // in T4Interface::InstallHooksAndPatches). Set true while we're in a demo
+    // so the hooks suppress the game's cursor re-centering / clipping.
+    inline std::atomic<bool> g_t4SuppressCursorPos{false};
+
+    // Our DLL's loaded address range — used by SetCursorPos hook to tell
+    // "WaW IN_Frame calling" (suppress) from "IWXMVM core LockMouse calling"
+    // (allow through). Populated at hook-install time.
+    inline std::uintptr_t g_t4SelfBase = 0;
+    inline std::uintptr_t g_t4SelfEnd  = 0;
+
+    // Trampolines for the hooks below. MinHook populates these via the OUT
+    // arg in CreateHook. Declared at namespace scope so the free hook
+    // functions can reach them without static-local-init races.
+    inline decltype(&SetCursorPos) g_OriginalSetCursorPos = nullptr;
+    inline decltype(&ClipCursor)   g_OriginalClipCursor   = nullptr;
+
+    // user32 SetCursorPos and ClipCursor are WINAPI (__stdcall). Captureless
+    // lambdas decay to __cdecl by default; calling them as stdcall corrupts
+    // the stack on RET and crashes the WaW caller. Declare these as proper
+    // free functions with WINAPI so the calling convention matches.
+    //
+    // SetCursorPos: pass through if caller is inside our DLL (GameView::
+    // LockMouse — that warp is required for ImGui's MousePosPrev compensation,
+    // suppressing it causes infinite freecam spin per reference-waw-lockmouse-
+    // setcursorpos). Suppress if caller is in CoDWaWmp.exe and we're in demo.
+    inline BOOL WINAPI T4_SetCursorPos_Hook(int X, int Y)
+    {
+        const auto ret = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
+        const bool fromOurDll = (g_t4SelfBase != 0 && ret >= g_t4SelfBase && ret < g_t4SelfEnd);
+        if (!fromOurDll && g_t4SuppressCursorPos.load(std::memory_order_acquire))
+            return TRUE;
+        return g_OriginalSetCursorPos ? g_OriginalSetCursorPos(X, Y) : FALSE;
+    }
+
+    inline BOOL WINAPI T4_ClipCursor_Hook(const RECT* rect)
+    {
+        // ClipCursor: blanket-suppress during demo. IWXMVM never clips itself
+        // so the caller-check isn't needed here.
+        if (g_t4SuppressCursorPos.load(std::memory_order_acquire))
+            return g_OriginalClipCursor ? g_OriginalClipCursor(nullptr) : TRUE;
+        return g_OriginalClipCursor ? g_OriginalClipCursor(rect) : TRUE;
+    }
+
     class T4Interface : public GameInterface
     {
        public:
@@ -77,6 +122,103 @@ namespace IWXMVM::T4
 
         void InstallHooksAndPatches() final
         {
+            // core/-cleanup-1:1 fallout: when a render-path listener throws
+            // (mostly VisualsMenu's off-screen RenderXxx OnFrame against
+            // unwired T4 dvars), upstream UIManager::RunImGuiFrame's catch(...)
+            // fires a MessageBox EVERY FRAME, which is unusable. We used to
+            // silence that in core/UIManager.cpp (log-once), but core/ is now
+            // 1:1 with upstream and we can't touch it.
+            //
+            // Pragmatic fix: hook user32!MessageBoxA so messages containing
+            // "IWXMVM" return IDOK immediately without showing the dialog.
+            // The catch still fires + logs once per process (well, per call),
+            // but the popup never blocks the user. Same effective behavior
+            // as the silencing we removed.
+            {
+                static decltype(&MessageBoxA) OriginalMessageBoxA = nullptr;
+                static decltype(&MessageBoxW) OriginalMessageBoxW = nullptr;
+                static auto MessageBoxA_Hook = +[](HWND hWnd, LPCSTR text, LPCSTR caption, UINT type) -> int {
+                    if (text && std::string_view(text).find("IWXMVM") != std::string_view::npos)
+                    {
+                        static bool warned = false;
+                        if (!warned) { warned = true; LOG_WARN("Suppressed IWXMVM MessageBoxA: \"{}\" (further silenced)", text); }
+                        return IDOK;
+                    }
+                    return OriginalMessageBoxA ? OriginalMessageBoxA(hWnd, text, caption, type) : IDOK;
+                };
+                static auto MessageBoxW_Hook = +[](HWND hWnd, LPCWSTR text, LPCWSTR caption, UINT type) -> int {
+                    if (text)
+                    {
+                        // Crude check — convert first 32 chars to narrow for substring match.
+                        char narrow[64] = {};
+                        WideCharToMultiByte(CP_ACP, 0, text, -1, narrow, sizeof(narrow) - 1, nullptr, nullptr);
+                        if (std::string_view(narrow).find("IWXMVM") != std::string_view::npos)
+                        {
+                            static bool warned = false;
+                            if (!warned) { warned = true; LOG_WARN("Suppressed IWXMVM MessageBoxW (further silenced)"); }
+                            return IDOK;
+                        }
+                    }
+                    return OriginalMessageBoxW ? OriginalMessageBoxW(hWnd, text, caption, type) : IDOK;
+                };
+                HMODULE user32 = ::GetModuleHandleA("user32.dll");
+                if (user32)
+                {
+                    auto* mbA = ::GetProcAddress(user32, "MessageBoxA");
+                    auto* mbW = ::GetProcAddress(user32, "MessageBoxW");
+                    T4::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(mbA),
+                                                reinterpret_cast<std::uintptr_t>(MessageBoxA_Hook),
+                                                reinterpret_cast<std::uintptr_t*>(&OriginalMessageBoxA));
+                    T4::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(mbW),
+                                                reinterpret_cast<std::uintptr_t>(MessageBoxW_Hook),
+                                                reinterpret_cast<std::uintptr_t*>(&OriginalMessageBoxW));
+                    LOG_INFO("MessageBoxA/W hooks installed (IWXMVM popup suppression)");
+                }
+            }
+
+            // core/-cleanup-1:1 fallout: WaW's IN_Frame re-centers the
+            // cursor every frame via SetCursorPos and clips it via
+            // ClipCursor. Long-term fix is to patch IN_Frame to a RET (like
+            // iw3 does) — but t4's IN_Frame address is still HardAddr<0>.
+            // Until that's wired, hook user32 SetCursorPos + ClipCursor
+            // with simple atomic-gated suppression. Both hook functions are
+            // declared at namespace scope above with proper WINAPI calling
+            // convention (captureless-lambda decay would give cdecl and
+            // crash the WaW caller on RET).
+            {
+                // Determine our DLL's loaded address range for the
+                // SetCursorPos caller-check (lets GameView::LockMouse's warp
+                // through while suppressing WaW's IN_Frame).
+                HMODULE self = nullptr;
+                ::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                     reinterpret_cast<LPCSTR>(&T4_SetCursorPos_Hook), &self);
+                if (self)
+                {
+                    MODULEINFO mi{};
+                    if (::GetModuleInformation(::GetCurrentProcess(), self, &mi, sizeof(mi)))
+                    {
+                        g_t4SelfBase = reinterpret_cast<std::uintptr_t>(mi.lpBaseOfDll);
+                        g_t4SelfEnd  = g_t4SelfBase + mi.SizeOfImage;
+                    }
+                }
+
+                HMODULE user32_2 = ::GetModuleHandleA("user32.dll");
+                if (user32_2)
+                {
+                    auto* setCP = ::GetProcAddress(user32_2, "SetCursorPos");
+                    auto* clipC = ::GetProcAddress(user32_2, "ClipCursor");
+                    T4::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(setCP),
+                                                reinterpret_cast<std::uintptr_t>(&T4_SetCursorPos_Hook),
+                                                reinterpret_cast<std::uintptr_t*>(&g_OriginalSetCursorPos));
+                    T4::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(clipC),
+                                                reinterpret_cast<std::uintptr_t>(&T4_ClipCursor_Hook),
+                                                reinterpret_cast<std::uintptr_t*>(&g_OriginalClipCursor));
+                    LOG_INFO("SetCursorPos + ClipCursor hooks installed (caller-gated; self range 0x{:X}..0x{:X})",
+                             g_t4SelfBase, g_t4SelfEnd);
+                }
+            }
+
             // T4 port work-in-progress: most signatures are still unverified, so
             // installing hooks/patches against zero addresses crashes the game.
             // Hooks::Commands::Install in particular dereferences hardcoded IW3
@@ -269,6 +411,15 @@ namespace IWXMVM::T4
                     ts->current.value = savedTimescale;
                     LOG_DEBUG("t4 pause sync: UNPAUSED (restored timescale to {:.4f})", savedTimescale);
                 }
+            });
+
+            // Update cursor-suppression atomic each frame so the user32
+            // SetCursorPos/ClipCursor hooks (installed in
+            // InstallHooksAndPatches) know whether we're in a demo.
+            Events::RegisterListener(EventType::OnFrame, [&]() {
+                g_t4SuppressCursorPos.store(
+                    GetGameState() == Types::GameState::InDemo,
+                    std::memory_order_release);
             });
 
             // t4 capture auto-unpause. CaptureManager::StartCapture doesn't
@@ -567,186 +718,225 @@ namespace IWXMVM::T4
             Functions::FindDvar("cg_fov")->current.value = fov;
         }
 
+        // core/-cleanup-1:1 fail-safe wrapper. Many visuals methods touch
+        // 10+ WaW dvars by FindDvar(...)->current.foo. If any dvar name is
+        // wrong or unwired in T4, that's a null deref → SEH AV → upstream
+        // catch(...) in UIManager fires MessageBox every frame (since
+        // VisualsMenu's OnFrame listener runs these even when the Visuals
+        // tab isn't selected). Wrap each method body so the throw stops at
+        // t4's boundary and a safe default is returned.
+// Variadic so initializer-list commas in `body` don't break arg counting.
+#define T4_SAFE_GET(name, ret_default, ...)                                                                     \
+    try { __VA_ARGS__ }                                                                                         \
+    catch (...)                                                                                                 \
+    {                                                                                                           \
+        static bool warned = false;                                                                             \
+        if (!warned) { warned = true; LOG_WARN("t4 " name ": exception caught (further silenced); returning default"); } \
+        return ret_default;                                                                                     \
+    }
+#define T4_SAFE_SET(name, ...)                                                                                  \
+    try { __VA_ARGS__ return; }                                                                                 \
+    catch (...)                                                                                                 \
+    {                                                                                                           \
+        static bool warned = false;                                                                             \
+        if (!warned) { warned = true; LOG_WARN("t4 " name ": exception caught (further silenced)"); }           \
+        return;                                                                                                 \
+    }
+
         Types::Sun GetSun() final
         {
-            const auto& r_lightTweakSunDirection = Functions::FindDvar("r_lightTweakSunDirection");
-            const auto& r_lightTweakSunColor = Functions::FindDvar("r_lightTweakSunColor");
-            const auto& r_lightTweakSunLight = Functions::FindDvar("r_lightTweakSunLight");
+            T4_SAFE_GET("GetSun", Types::Sun{},
+                const auto& r_lightTweakSunDirection = Functions::FindDvar("r_lightTweakSunDirection");
+                const auto& r_lightTweakSunColor = Functions::FindDvar("r_lightTweakSunColor");
+                const auto& r_lightTweakSunLight = Functions::FindDvar("r_lightTweakSunLight");
 
-            auto unpackedColor = glm::unpackUint4x8(r_lightTweakSunColor->current.integer);
+                auto unpackedColor = glm::unpackUint4x8(r_lightTweakSunColor->current.integer);
 
-            Types::Sun sun;
-            sun.color = glm::vec3(unpackedColor.x / 255.0f, unpackedColor.y / 255.0f, unpackedColor.z / 255.0f);
-            sun.direction = glm::vec3(
-                r_lightTweakSunDirection->current.vector[0], 
-                r_lightTweakSunDirection->current.vector[1],
-                r_lightTweakSunDirection->current.vector[2]
-            );
-            sun.brightness = Functions::FindDvar("r_lightTweakSunLight")->current.value;
-            return sun;
+                Types::Sun sun;
+                sun.color = glm::vec3(unpackedColor.x / 255.0f, unpackedColor.y / 255.0f, unpackedColor.z / 255.0f);
+                sun.direction = glm::vec3(
+                    r_lightTweakSunDirection->current.vector[0],
+                    r_lightTweakSunDirection->current.vector[1],
+                    r_lightTweakSunDirection->current.vector[2]
+                );
+                sun.brightness = r_lightTweakSunLight->current.value;
+                return sun;
+            )
         }
 
         Types::DoF GetDof()
         {
-            Types::DoF dof = 
-            {
-                Functions::FindDvar("r_dof_tweak")->current.enabled &&
-                    Functions::FindDvar("r_dof_enable")->current.enabled,
-                Functions::FindDvar("r_dof_farBlur")->current.value,
-                Functions::FindDvar("r_dof_farStart")->current.value,
-                Functions::FindDvar("r_dof_farEnd")->current.value,
-                Functions::FindDvar("r_dof_nearBlur")->current.value,
-                Functions::FindDvar("r_dof_nearStart")->current.value,
-                Functions::FindDvar("r_dof_nearEnd")->current.value,
-                Functions::FindDvar("r_dof_bias")->current.value
-            };
-
-            return dof;
+            T4_SAFE_GET("GetDof", Types::DoF{},
+                Types::DoF dof =
+                {
+                    Functions::FindDvar("r_dof_tweak")->current.enabled &&
+                        Functions::FindDvar("r_dof_enable")->current.enabled,
+                    Functions::FindDvar("r_dof_farBlur")->current.value,
+                    Functions::FindDvar("r_dof_farStart")->current.value,
+                    Functions::FindDvar("r_dof_farEnd")->current.value,
+                    Functions::FindDvar("r_dof_nearBlur")->current.value,
+                    Functions::FindDvar("r_dof_nearStart")->current.value,
+                    Functions::FindDvar("r_dof_nearEnd")->current.value,
+                    Functions::FindDvar("r_dof_bias")->current.value
+                };
+                return dof;
+            )
         }
 
         Types::Filmtweaks GetFilmtweaks()
         {
-            Types::Filmtweaks filmtweaks = {
-                Functions::FindDvar("r_filmUseTweaks")->current.enabled &&
-                    Functions::FindDvar("r_filmTweakEnable")->current.enabled,
-                Functions::FindDvar("r_filmTweakBrightness")->current.value,
-                Functions::FindDvar("r_filmTweakContrast")->current.value,
-                Functions::FindDvar("r_filmTweakDesaturation")->current.value,
-                glm::make_vec3(Functions::FindDvar("r_filmTweakLightTint")->current.vector),
-                glm::make_vec3(Functions::FindDvar("r_filmTweakDarkTint")->current.vector),
-                Functions::FindDvar("r_filmTweakInvert")->current.enabled
-            };
-
-            return filmtweaks;
+            T4_SAFE_GET("GetFilmtweaks", Types::Filmtweaks{},
+                Types::Filmtweaks filmtweaks = {
+                    Functions::FindDvar("r_filmUseTweaks")->current.enabled &&
+                        Functions::FindDvar("r_filmTweakEnable")->current.enabled,
+                    Functions::FindDvar("r_filmTweakBrightness")->current.value,
+                    Functions::FindDvar("r_filmTweakContrast")->current.value,
+                    Functions::FindDvar("r_filmTweakDesaturation")->current.value,
+                    glm::make_vec3(Functions::FindDvar("r_filmTweakLightTint")->current.vector),
+                    glm::make_vec3(Functions::FindDvar("r_filmTweakDarkTint")->current.vector),
+                    Functions::FindDvar("r_filmTweakInvert")->current.enabled
+                };
+                return filmtweaks;
+            )
         }
 
         Types::HudInfo GetHudInfo()
         {
-            glm::vec3 teamColorAllies;
-            auto ss = std::stringstream(Functions::FindDvar("g_TeamColor_Allies")->current.string);
-            ss >> teamColorAllies[0] >> teamColorAllies[1] >> teamColorAllies[2];
-            
-            glm::vec3 teamColorAxis;
-            ss = std::stringstream(Functions::FindDvar("g_TeamColor_Axis")->current.string);
-            ss >> teamColorAxis[0] >> teamColorAxis[1] >> teamColorAxis[2];
+            T4_SAFE_GET("GetHudInfo", Types::HudInfo{},
+                glm::vec3 teamColorAllies;
+                auto ss = std::stringstream(Functions::FindDvar("g_TeamColor_Allies")->current.string);
+                ss >> teamColorAllies[0] >> teamColorAllies[1] >> teamColorAllies[2];
 
-            Types::HudInfo hudInfo = {
-                Functions::FindDvar("cg_draw2D")->current.enabled,
-                !Functions::FindDvar("ui_hud_hardcore")->current.enabled,
-                Functions::FindDvar("cg_drawShellshock")->current.enabled,
-                Functions::FindDvar("ui_drawCrosshair")->current.enabled, 
-                Hooks::HUD::showScore,
-                Hooks::HUD::showOtherText, 
-                !Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.IsApplied(),
-                Functions::FindDvar("ui_hud_obituaries")->current.string[0] == '1',
-                teamColorAllies,   
-                teamColorAxis
-            };
+                glm::vec3 teamColorAxis;
+                ss = std::stringstream(Functions::FindDvar("g_TeamColor_Axis")->current.string);
+                ss >> teamColorAxis[0] >> teamColorAxis[1] >> teamColorAxis[2];
 
-            return hudInfo;
+                Types::HudInfo hudInfo = {
+                    Functions::FindDvar("cg_draw2D")->current.enabled,
+                    !Functions::FindDvar("ui_hud_hardcore")->current.enabled,
+                    Functions::FindDvar("cg_drawShellshock")->current.enabled,
+                    Functions::FindDvar("ui_drawCrosshair")->current.enabled,
+                    Hooks::HUD::showScore,
+                    Hooks::HUD::showOtherText,
+                    !Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.IsApplied(),
+                    Functions::FindDvar("ui_hud_obituaries")->current.string[0] == '1',
+                    teamColorAllies,
+                    teamColorAxis
+                };
+
+                return hudInfo;
+            )
         }
 
         void SetSun(Types::Sun sun) final
         {
-            const auto& r_lightTweakSunDirection = Functions::FindDvar("r_lightTweakSunDirection");
-            const auto& r_lightTweakSunColor = Functions::FindDvar("r_lightTweakSunColor");
-            const auto& r_lightTweakSunLight = Functions::FindDvar("r_lightTweakSunLight");
-            auto packedColor = glm::packUint4x8(glm::i8vec4(static_cast<uint8_t>(sun.color.x * 255),
-                                                           static_cast<uint8_t>(sun.color.y * 255),
-                                                           static_cast<uint8_t>(sun.color.z * 255), 1));
-            for (int i = 0; i < 3; ++i)
-            {
-                r_lightTweakSunDirection->current.vector[i] = sun.direction[i];
-            }
-            r_lightTweakSunColor->current.integer = packedColor;
-            r_lightTweakSunLight->current.value = sun.brightness;
+            T4_SAFE_SET("SetSun",
+                const auto& r_lightTweakSunDirection = Functions::FindDvar("r_lightTweakSunDirection");
+                const auto& r_lightTweakSunColor = Functions::FindDvar("r_lightTweakSunColor");
+                const auto& r_lightTweakSunLight = Functions::FindDvar("r_lightTweakSunLight");
+                auto packedColor = glm::packUint4x8(glm::i8vec4(static_cast<uint8_t>(sun.color.x * 255),
+                                                               static_cast<uint8_t>(sun.color.y * 255),
+                                                               static_cast<uint8_t>(sun.color.z * 255), 1));
+                for (int i = 0; i < 3; ++i)
+                {
+                    r_lightTweakSunDirection->current.vector[i] = sun.direction[i];
+                }
+                r_lightTweakSunColor->current.integer = packedColor;
+                r_lightTweakSunLight->current.value = sun.brightness;
 
-            r_lightTweakSunDirection->modified = true;
-            r_lightTweakSunColor->modified = true;
-            r_lightTweakSunLight->modified = true;
+                r_lightTweakSunDirection->modified = true;
+                r_lightTweakSunColor->modified = true;
+                r_lightTweakSunLight->modified = true;
+            )
         }
 
         void SetDof(Types::DoF dof) final
         {
-            Functions::FindDvar("r_dof_tweak")->current.enabled = dof.enabled;
-            Functions::FindDvar("r_dof_enable")->current.enabled = dof.enabled;
-            
-            Functions::FindDvar("r_dof_farBlur")->current.value = dof.farBlur;
-            Functions::FindDvar("r_dof_farStart")->current.value = dof.farStart;
-            Functions::FindDvar("r_dof_farEnd")->current.value = dof.farEnd;
-            
-            // hacky workaround because nearblur works weirdly in this game
-            if (dof.nearBlur < 1.3f)
-            {
-                dof.nearBlur = 5;
-                dof.nearStart = 0;
-                dof.nearEnd = 0;
-            }
+            T4_SAFE_SET("SetDof",
+                Functions::FindDvar("r_dof_tweak")->current.enabled = dof.enabled;
+                Functions::FindDvar("r_dof_enable")->current.enabled = dof.enabled;
 
-            Functions::FindDvar("r_dof_nearBlur")->current.value = dof.nearBlur;
-            Functions::FindDvar("r_dof_nearStart")->current.value = dof.nearStart;
-            Functions::FindDvar("r_dof_nearEnd")->current.value = dof.nearEnd;
+                Functions::FindDvar("r_dof_farBlur")->current.value = dof.farBlur;
+                Functions::FindDvar("r_dof_farStart")->current.value = dof.farStart;
+                Functions::FindDvar("r_dof_farEnd")->current.value = dof.farEnd;
 
-            Functions::FindDvar("r_dof_bias")->current.value = dof.bias;
+                // hacky workaround because nearblur works weirdly in this game
+                if (dof.nearBlur < 1.3f)
+                {
+                    dof.nearBlur = 5;
+                    dof.nearStart = 0;
+                    dof.nearEnd = 0;
+                }
+
+                Functions::FindDvar("r_dof_nearBlur")->current.value = dof.nearBlur;
+                Functions::FindDvar("r_dof_nearStart")->current.value = dof.nearStart;
+                Functions::FindDvar("r_dof_nearEnd")->current.value = dof.nearEnd;
+
+                Functions::FindDvar("r_dof_bias")->current.value = dof.bias;
+            )
         }
 
         void SetFilmtweaks(Types::Filmtweaks filmtweaks) final
         {
-            Functions::FindDvar("r_filmUseTweaks")->current.enabled = filmtweaks.enabled;
-            Functions::FindDvar("r_filmTweakEnable")->current.enabled = filmtweaks.enabled;
-            Functions::FindDvar("r_filmTweakBrightness")->current.value = filmtweaks.brightness;
-            Functions::FindDvar("r_filmTweakContrast")->current.value = filmtweaks.contrast;
-            Functions::FindDvar("r_filmTweakDesaturation")->current.value = filmtweaks.desaturation;
-            for (int i = 0; i < 3; ++i)
-            {
-                Functions::FindDvar("r_filmTweakLightTint")->current.vector[i] =
-                    glm::value_ptr(filmtweaks.tintLight)[i];
-                Functions::FindDvar("r_filmTweakDarkTint")->current.vector[i] = glm::value_ptr(filmtweaks.tintDark)[i];
-            }
-            Functions::FindDvar("r_filmTweakInvert")->current.enabled = filmtweaks.invert;
+            T4_SAFE_SET("SetFilmtweaks",
+                Functions::FindDvar("r_filmUseTweaks")->current.enabled = filmtweaks.enabled;
+                Functions::FindDvar("r_filmTweakEnable")->current.enabled = filmtweaks.enabled;
+                Functions::FindDvar("r_filmTweakBrightness")->current.value = filmtweaks.brightness;
+                Functions::FindDvar("r_filmTweakContrast")->current.value = filmtweaks.contrast;
+                Functions::FindDvar("r_filmTweakDesaturation")->current.value = filmtweaks.desaturation;
+                for (int i = 0; i < 3; ++i)
+                {
+                    Functions::FindDvar("r_filmTweakLightTint")->current.vector[i] =
+                        glm::value_ptr(filmtweaks.tintLight)[i];
+                    Functions::FindDvar("r_filmTweakDarkTint")->current.vector[i] = glm::value_ptr(filmtweaks.tintDark)[i];
+                }
+                Functions::FindDvar("r_filmTweakInvert")->current.enabled = filmtweaks.invert;
+            )
         }
 
         void SetHudInfo(Types::HudInfo hudInfo) final
         {
-            Functions::FindDvar("con_gamemsgwindow0msgtime")->current.value = 5;
-            Functions::FindDvar("con_gamemsgwindow0linecount")->current.integer = 4;
+            T4_SAFE_SET("SetHudInfo",
+                Functions::FindDvar("con_gamemsgwindow0msgtime")->current.value = 5;
+                Functions::FindDvar("con_gamemsgwindow0linecount")->current.integer = 4;
 
-            Functions::FindDvar("cg_draw2D")->current.enabled = hudInfo.show2DElements;
+                Functions::FindDvar("cg_draw2D")->current.enabled = hudInfo.show2DElements;
 
-            Functions::FindDvar("ui_hud_hardcore")->current.enabled = !hudInfo.showPlayerHUD;
-            Functions::FindDvar("cg_centertime")->current.value = hudInfo.showPlayerHUD ? 5.0f : 0.0f;
-            Functions::FindDvar("cg_overheadranksize")->current.value = hudInfo.showPlayerHUD ? 0.5f : 0;
-            Functions::FindDvar("cg_overheadnamessize")->current.value = hudInfo.showPlayerHUD ? 0.5f : 0;
-            Functions::FindDvar("cg_overheadiconsize")->current.value = hudInfo.showPlayerHUD ? 0.7f : 0;
+                Functions::FindDvar("ui_hud_hardcore")->current.enabled = !hudInfo.showPlayerHUD;
+                Functions::FindDvar("cg_centertime")->current.value = hudInfo.showPlayerHUD ? 5.0f : 0.0f;
+                Functions::FindDvar("cg_overheadranksize")->current.value = hudInfo.showPlayerHUD ? 0.5f : 0;
+                Functions::FindDvar("cg_overheadnamessize")->current.value = hudInfo.showPlayerHUD ? 0.5f : 0;
+                Functions::FindDvar("cg_overheadiconsize")->current.value = hudInfo.showPlayerHUD ? 0.7f : 0;
 
-            Functions::FindDvar("cg_drawShellshock")->current.enabled = hudInfo.showShellshock;
-            Functions::FindDvar("ui_hud_obituaries")->current.string = hudInfo.showKillfeed ? "1" : "0";
-            Functions::FindDvar("ui_drawCrosshair")->current.enabled = hudInfo.showCrosshair;
-            Hooks::HUD::showScore = hudInfo.showScore;
-            Hooks::HUD::showOtherText = hudInfo.showOtherText;
-            if (hudInfo.showBloodOverlay)
-            {
-                Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.Revert();
-                Patches::GetGamePatches().CG_DrawFlashDamage.Revert();
-                Patches::GetGamePatches().CG_DrawDamageDirectionIndicators.Revert();
-            }
-            else
-            {
-                Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.Apply();
-                Patches::GetGamePatches().CG_DrawFlashDamage.Apply();
-                Patches::GetGamePatches().CG_DrawDamageDirectionIndicators.Apply();
-            }
+                Functions::FindDvar("cg_drawShellshock")->current.enabled = hudInfo.showShellshock;
+                Functions::FindDvar("ui_hud_obituaries")->current.string = hudInfo.showKillfeed ? "1" : "0";
+                Functions::FindDvar("ui_drawCrosshair")->current.enabled = hudInfo.showCrosshair;
+                Hooks::HUD::showScore = hudInfo.showScore;
+                Hooks::HUD::showOtherText = hudInfo.showOtherText;
+                if (hudInfo.showBloodOverlay)
+                {
+                    Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.Revert();
+                    Patches::GetGamePatches().CG_DrawFlashDamage.Revert();
+                    Patches::GetGamePatches().CG_DrawDamageDirectionIndicators.Revert();
+                }
+                else
+                {
+                    Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.Apply();
+                    Patches::GetGamePatches().CG_DrawFlashDamage.Apply();
+                    Patches::GetGamePatches().CG_DrawDamageDirectionIndicators.Apply();
+                }
 
-            std::stringstream teamColorAllies;
-            teamColorAllies << hudInfo.killfeedTeam1Color[0] << " " << hudInfo.killfeedTeam1Color[1] << " "
-                            << hudInfo.killfeedTeam1Color[2] << " 1\0";
+                std::stringstream teamColorAllies;
+                teamColorAllies << hudInfo.killfeedTeam1Color[0] << " " << hudInfo.killfeedTeam1Color[1] << " "
+                                << hudInfo.killfeedTeam1Color[2] << " 1\0";
 
-            Functions::Dvar_SetStringByName("g_TeamColor_Allies", teamColorAllies.str().c_str());
+                Functions::Dvar_SetStringByName("g_TeamColor_Allies", teamColorAllies.str().c_str());
 
-            std::stringstream teamColorAxis;
-            teamColorAxis << hudInfo.killfeedTeam2Color[0] << " " << hudInfo.killfeedTeam2Color[1] << " " 
-                          << hudInfo.killfeedTeam2Color[2] << " 1\0";
-            Functions::Dvar_SetStringByName("g_TeamColor_Axis", teamColorAxis.str().c_str());
+                std::stringstream teamColorAxis;
+                teamColorAxis << hudInfo.killfeedTeam2Color[0] << " " << hudInfo.killfeedTeam2Color[1] << " "
+                              << hudInfo.killfeedTeam2Color[2] << " 1\0";
+                Functions::Dvar_SetStringByName("g_TeamColor_Axis", teamColorAxis.str().c_str());
+            )
         }
         
         std::vector<Types::Entity> GetEntities() final
@@ -773,16 +963,53 @@ namespace IWXMVM::T4
                 }
             };
 
+            // T4 port: centity_s inner-field offsets are IW3-style and don't
+            // match T4 (see Structures.hpp comment on centity_s pad). So
+            // entity.pose.eType reads garbage for most slots — only ~1 slot
+            // accidentally lands on ET_PLAYER, making the bonecam dropdown
+            // useless. Bypass: use the slot INDEX as the player heuristic.
+            // WaW MP reserves slots 0..MAX_CLIENTS-1 for players (MAX_CLIENTS
+            // = 18 in WaW MP). Beyond that, mark Unsupported. clientNum and
+            // isValid are set to defensible defaults until real offsets are
+            // wired.
+            constexpr int MAX_CLIENTS_WAW_MP = 18;
+
+            // POV player marker: read cg_s.clientNum at 0x0098FCE0 (per
+            // session-7 bonecam memory). That slot's bonecam entry gets a
+            // distinctive id=999 so the dropdown labels it "Player 999"
+            // instead of its raw slot number. core/ stays 1:1 — we can't
+            // change Entity::ToString to literally say "POV Player", but
+            // the user can spot "Player 999" easily. The vector POSITION
+            // still equals the real slot (preserves clientObjMap indexing
+            // in GetBoneData); only the displayed .id changes.
+            int povClientNum = -1;
+            try {
+                povClientNum = static_cast<int>(
+                    *reinterpret_cast<volatile std::uint32_t*>(0x0098FCE0));
+                if (povClientNum < 0 || povClientNum >= MAX_CLIENTS_WAW_MP)
+                    povClientNum = -1;  // out of range = unknown/bogus, skip relabel
+            } catch (...) { povClientNum = -1; }
+
             for (int i = 0; i < 256; i++)
             {
                 auto entity = cg_entities[i];
+                auto typeFromIw3 = ToEntityType(entity.pose.eType);
+                Types::EntityType type = typeFromIw3;
+                if (i < MAX_CLIENTS_WAW_MP && typeFromIw3 == Types::EntityType::Unsupported)
+                {
+                    // Heuristic: any first-18 slot that didn't already
+                    // classify is a player candidate. User picks one; if it
+                    // has no dobj/model, GetBoneData returns id=-1 cleanly.
+                    type = Types::EntityType::Player;
+                }
+                int displayId = (i == povClientNum) ? 999 : i;
                 entities.push_back(
                     Types::Entity
                     {
-                        .id = i, 
-                        .type = ToEntityType(entity.pose.eType),
-                        .clientNum = entity.nextState.clientNum,
-                        .isValid = entity.nextValid
+                        .id = displayId,
+                        .type = type,
+                        .clientNum = i,    // until real offset is wired, slot==clientNum
+                        .isValid = true,
                     }
                 );
             }
@@ -792,18 +1019,32 @@ namespace IWXMVM::T4
 
         auto FindBoneIndex(Structures::DObj_s* dobj, uint16_t boneName)
         {
-            if (!dobj->models || !dobj->numModels)
+            try {
+            if (!dobj || !dobj->models || !dobj->numModels)
+                return -1;
+
+            // Sanity: dobj->numModels is a uint8 nominally <16 in practice.
+            // If we see a value out of plausible range, treat as garbage dobj
+            // (e.g. local POV viewer with no model in first-person) and bail
+            // before we deref dobj->models[m] into who-knows-where.
+            const int numModels = static_cast<unsigned char>(dobj->numModels);
+            if (numModels <= 0 || numModels > 32)
                 return -1;
 
             auto boneIndex = -1;
-
             auto totalBones = 0;
-            for (int m = 0; m < dobj->numModels; m++)
+            for (int m = 0; m < numModels; m++)
             {
                 auto model = dobj->models[m];
-                if (!model || !model->numBones)
+                if (!model)
                     return -1;
-                for (int b = 0; b < model->numBones; b++)
+                const int numBones = static_cast<unsigned int>(model->numBones);
+                if (numBones <= 0 || numBones > 512)
+                    return -1;
+                if (!model->boneNames)
+                    return -1;
+
+                for (int b = 0; b < numBones; b++)
                 {
                     auto bone = model->boneNames[b];
                     if (bone == boneName)
@@ -811,66 +1052,87 @@ namespace IWXMVM::T4
                         boneIndex = totalBones + b;
                     }
                 }
-                totalBones += model->numBones;
+                totalBones += numBones;
             }
 
             return boneIndex;
+            } catch (...) {
+                // Garbage dobj/model pointers — return -1 cleanly so the
+                // outer GetBoneData can fall through to its safe fallback
+                // instead of being caught by the outer try/catch.
+                return -1;
+            }
         }
 
         Types::BoneData GetBoneData(int32_t entityId, const std::string& name) final
         {
+            // Wrap in try/catch so a bad bone lookup can't crash the render
+            // pipeline (BoneCamera::Update fires every frame). NOTE: as of
+            // 2026-05-25 the underlying CG_DObjGetWorldBoneMatrix call still
+            // throws — see project-iwxmvm-bonecam-blocked for context.
+            // Returning id=-1 just shows "Bone not found on entity" in the UI.
+            try {
             uint16_t* clientObjMap = Structures::GetClientObjectMap();
             Structures::DObj_s* objBuf = Structures::GetObjBuf();
+            if (!clientObjMap || !objBuf)
+            {
+                static bool warned = false;
+                if (!warned) { warned = true; LOG_WARN("GetBoneData: clientObjMap or objBuf null — bonecam unavailable"); }
+                return {.id = -1};
+            }
 
             uint16_t dobjIndex = clientObjMap[entityId];
             Structures::DObj_s* dobj = &objBuf[dobjIndex];
 
             auto entities = Structures::GetEntities();
             auto entity = &entities[entityId];
+
             // T4 MP SL_GetStringOfSize is 4-arg: (inst, string, user, len).
             // inst=0 = server-side script instance (default for engine code).
             auto boneName = Functions::SL_GetStringOfSize(
                 0, name.c_str(), 1, static_cast<unsigned int>(name.size() + 1));
 
-            // T4 port 2026-05-24: SKIP the timestamp swap. IW3 forces
-            // bone recomputation by overwriting dobj->skel.timeStamp with
+            // T4 port 2026-05-24: SKIP the timestamp swap. IW3 forces bone
+            // recomputation by overwriting dobj->skel.timeStamp with
             // clientActive.skelTimeStamp. In T4 we don't have the right
-            // clientActive offset for skelTimeStamp yet (it's a placeholder
-            // reading garbage), so the swap was setting dobj's timestamp to
-            // a wrong value and causing T4's CG_DObjGetWorldBoneMatrix to
-            // return STALE cached bones (likely from entity spawn position
-            // — making camera appear under the map). Letting dobj keep its
-            // engine-maintained timestamp lets the function use the correct
-            // current bones.
+            // clientActive offset for skelTimeStamp yet, so the swap was
+            // setting dobj's timestamp to a garbage value.
 
             auto boneIndex = FindBoneIndex(dobj, boneName);
             if (boneIndex == -1)
-            {
-                static int log_ct = 0;
-                if (++log_ct < 5)
-                    LOG_INFO("GetBoneData: bone='{}' (token={}) NOT FOUND in {} models (dobj idx={}, dobj@{})",
-                             name, boneName, (int)dobj->numModels, dobjIndex, (void*)dobj);
                 return {.id = -1};
-            }
 
-            float rotationMatrix[3 * 3];
+            // Matrix MUST be 3x4 (12 floats) per X360 catalog signature
+            // `int CG_DObjGetWorldBoneMatrix(cpose_t*, DObj_s*, int,
+            //  float[3][4]& axis, float* origin)`. Allocating 3x3 (9 floats)
+            // overflowed the stack into the adjacent `origin` buffer and
+            // caused the wrapper to corrupt return values.
+            float rotationMatrix[3 * 4];   // 12 floats per actual signature
             float origin[3];
-            auto result = Functions::CG_DObjGetWorldBoneMatrix(entity, boneIndex, (float*)rotationMatrix, dobj, origin);
+
+            auto result = Functions::CG_DObjGetWorldBoneMatrix(
+                entity, boneIndex, (float*)rotationMatrix, dobj, origin);
 
             if (!result)
-            {
-                static int log_ct = 0;
-                if (++log_ct < 5)
-                    LOG_INFO("GetBoneData: CG_DObjGetWorldBoneMatrix returned false (bone='{}' idx={})",
-                             name, boneIndex);
                 return {.id = -1};
-            }
 
             Types::BoneData boneData;
             boneData.id = boneIndex;
             boneData.position = glm::make_vec3(origin);
-            boneData.rotation = glm::make_mat3(rotationMatrix);
+            // 3x4 matrix: take rows [0..2], cols [0..2] — skip the 4th column
+            // (translation, redundant with `origin`). Pack into 3x3 for caller.
+            float rotMat3x3[9] = {
+                rotationMatrix[0], rotationMatrix[1], rotationMatrix[2],
+                rotationMatrix[4], rotationMatrix[5], rotationMatrix[6],
+                rotationMatrix[8], rotationMatrix[9], rotationMatrix[10],
+            };
+            boneData.rotation = glm::make_mat3(rotMat3x3);
             return boneData;
+            } catch (...) {
+                static bool warned = false;
+                if (!warned) { warned = true; LOG_WARN("GetBoneData: CG_DObjGetWorldBoneMatrix threw (further silenced); see project-iwxmvm-bonecam-blocked"); }
+                return {.id = -1};
+            }
         }
 
         constexpr std::vector<std::string> GetSupportedBoneNames()

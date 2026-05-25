@@ -66,12 +66,20 @@ namespace IWXMVM::T4::Functions
     }
 
     
-    bool CG_DObjGetWorldBoneMatrix(Structures::centity_s* entity /*@<eax>*/, int boneIndex /*@<ecx>*/, 
+    bool CG_DObjGetWorldBoneMatrix(Structures::centity_s* entity /*@<eax>*/, int boneIndex /*@<ecx>*/,
                                    float* matrix /*@<esi>*/, Structures::DObj_s* dobj, float* origin)
     {
+        // T4 MP calling convention — same ABI as iw3 (shipping for years):
+        //   entity@<eax>, boneIndex@<ecx>, matrix@<esi>, then cdecl stack:
+        //   push origin, push dobj. (NOT t4-rtx's SP ABI which uses edi for
+        //   obj and stack for axis — different function, different layout.)
+        // pushad/popad preserves all caller registers across the call;
+        // result EAX captured to a static before popad restores it.
         static uintptr_t address = GetGameAddresses().CG_DObjGetWorldBoneMatrix();
-        __asm 
+        static int result_byte = 0;
+        __asm
         {
+            pushad
             mov eax, entity
             mov ecx, boneIndex
             mov esi, matrix
@@ -79,7 +87,10 @@ namespace IWXMVM::T4::Functions
             push dobj
             call address
             add esp, 8
+            mov result_byte, eax
+            popad
         }
+        return result_byte != 0;
     }
 
 
