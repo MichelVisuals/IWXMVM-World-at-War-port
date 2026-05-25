@@ -14,6 +14,7 @@
 #include "Patches.hpp"
 #include "Components/Rewinding.hpp"
 #include "Components/Playback.hpp"
+#include "Components/CaptureManager.hpp"
 
 #include "glm/vec3.hpp"
 #include "glm/gtc/type_ptr.hpp"
@@ -282,6 +283,23 @@ namespace IWXMVM::T4
                     ts->current.value = savedTimescale;
                     LOG_DEBUG("t4 pause sync: UNPAUSED (restored timescale to {:.4f})", savedTimescale);
                 }
+            });
+
+            // t4 capture auto-unpause. CaptureManager::StartCapture doesn't
+            // unpause the demo itself, so if the user hit Capture while
+            // paused, cls.realtime stayed frozen by our pause sync above and
+            // zero useful frames landed in the output. Watch isCapturing for
+            // a false->true edge and toggle pause once. Lives in t4/ instead
+            // of core/CaptureManager because core/ stays 1:1 with upstream.
+            Events::RegisterListener(EventType::OnFrame, [&]() {
+                static bool wasCapturing = false;
+                const bool isCapturing = Components::CaptureManager::Get().IsCapturing();
+                if (isCapturing && !wasCapturing && Components::Playback::IsPaused())
+                {
+                    LOG_DEBUG("t4 capture auto-unpause: capture started while paused -> toggling pause");
+                    Components::Playback::TogglePaused();
+                }
+                wasCapturing = isCapturing;
             });
         }
 
