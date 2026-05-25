@@ -9,7 +9,6 @@
 #include "Utilities/PathUtils.hpp"
 #include "Mod.hpp"
 #include "UI/UIManager.hpp"
-#include "UI/Components/GameView.hpp"
 #include "Utilities/HookManager.hpp"
 
 namespace IWXMVM::D3D9
@@ -27,72 +26,6 @@ namespace IWXMVM::D3D9
     typedef HRESULT(__stdcall* EndScene_t)(IDirect3DDevice9* pDevice);
     EndScene_t EndScene;
     EndScene_t ReshadeOriginalEndScene;
-
-    // T4 port: hook GetCursorPos so the game receives a frozen cursor
-    // position whenever IWXMVM owns input. WaW's main-menu cursor follows
-    // GetCursorPos polling rather than WM_MOUSEMOVE, so the WndProc-level
-    // suppression in UIManager::ImGuiWndProc isn't enough on its own.
-    typedef BOOL(WINAPI* GetCursorPos_t)(LPPOINT);
-    GetCursorPos_t OriginalGetCursorPos = nullptr;
-    POINT frozenCursorPos = {0, 0};
-    BOOL WINAPI GetCursorPos_Hook(LPPOINT lpPoint)
-    {
-        if (!lpPoint || !OriginalGetCursorPos)
-            return OriginalGetCursorPos ? OriginalGetCursorPos(lpPoint) : FALSE;
-
-        const BOOL result = OriginalGetCursorPos(lpPoint);
-        if (!result)
-            return FALSE;
-
-        if (UI::UIManager::Get().IsInputCaptured())
-        {
-            // Return the position last seen before capture turned on so the
-            // game thinks the cursor is stationary.
-            *lpPoint = frozenCursorPos;
-        }
-        else
-        {
-            // Cache the live position so we have something fresh to freeze
-            // the next time capture toggles on.
-            frozenCursorPos = *lpPoint;
-        }
-        return TRUE;
-    }
-
-    // T4 port: hook user32!SetCursorPos so WaW's IN_Frame cannot re-center
-    // the cursor every frame while IWXMVM has input capture. Without this,
-    // during demo playback (when state machine runs IN_Frame) the cursor
-    // jumps back to the game's center on every frame, making it impossible
-    // to click on the IWXMVM overlay panels.
-    typedef BOOL(WINAPI* SetCursorPos_t)(int, int);
-    SetCursorPos_t OriginalSetCursorPos = nullptr;
-    BOOL WINAPI SetCursorPos_Hook(int X, int Y)
-    {
-        // T4 port (2026-05-23): when GameView::LockMouse is the caller, ALWAYS
-        // let the SetCursorPos through. LockMouse needs to actually warp the
-        // cursor to viewportCenter for its MousePosPrev compensation trick
-        // to work — otherwise ImGui's MouseDelta picks up a permanent phantom
-        // (cursor - center) delta and freecam spins endlessly.
-        // See UI/Components/GameView.cpp::LockMouse and the
-        // g_setCursorPosFromLockMouse flag set right around the SetCursorPos
-        // call there.
-        if (UI::g_setCursorPosFromLockMouse.load(std::memory_order_acquire))
-        {
-            if (!OriginalSetCursorPos) return FALSE;
-            return OriginalSetCursorPos(X, Y);
-        }
-
-        // T4 port: otherwise, suppress while a demo is playing or IWXMVM
-        // owns input. (Blanket suppression keeps WaW's IN_Frame from
-        // stealing the cursor from our overlay during playback.)
-        if (UI::UIManager::Get().IsInputCaptured() ||
-            Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo)
-        {
-            return TRUE;
-        }
-        if (!OriginalSetCursorPos) return FALSE;
-        return OriginalSetCursorPos(X, Y);
-    }
     typedef HRESULT(__stdcall* Reset_t)(IDirect3DDevice9* pDevice, D3DPRESENT_PARAMETERS* pPresentationParameters);
     Reset_t Reset;
     typedef HRESULT(__stdcall* Present_t)(IDirect3DDevice9* pDevice, const RECT* pSourceRect, const RECT* pDestRect,
@@ -228,75 +161,9 @@ namespace IWXMVM::D3D9
 
     bool capturedAlready = false;
     std::size_t reshadeEndSceneCallCount;
-    // T4 port: gate ImGui rendering to once per frame. WaW calls EndScene
-    // multiple times per frame (typically 3D scene + 2D HUD), and rendering
-    // IWXMVM on every call meant the 2nd call's CaptureBackBuffer captured
-    // the 1st call's IWXMVM overlay -> user saw IWXMVM UI inside the
-    // captured GameView image. This flag is set on the first EndScene of a
-    // frame and reset in SwapChainPresent_Hook below.
-    bool imguiRenderedThisFrame = false;
     HRESULT __stdcall EndScene_Hook(IDirect3DDevice9* pDevice)
     {
-        // T4 port diagnostic: init + CheckForOverlays + RunImGuiFrame.
-        // If stable -> we should see the IWXMVM overlay!
-        // If crashes -> RunImGuiFrame is the issue.
-        static bool init_done = false;
-        if (!init_done)
-        {
-            init_done = true;
-            device = pDevice;
-            UI::UIManager::Get().Initialize(pDevice);
-            GFX::GraphicsManager::Get().Initialize();
-        }
-
         const std::uintptr_t returnAddress = reinterpret_cast<std::uintptr_t>(_ReturnAddress());
-        if (CheckForOverlays(returnAddress))
-        {
-            return EndScene(pDevice);
-        }
-
-        // T4 port (2026-05-23 session 4): restore GraphicsManager::Render
-        // so campath visualizers (camera-icon meshes + yellow connecting
-        // line) appear in the captured GameView texture. Must run BEFORE
-        // RunImGuiFrame because GameView::Draw inside that frame call is
-        // what samples the backbuffer (CaptureBackBuffer). Without this,
-        // GraphicsManager::Render sat in the dead-code block below — built
-        // but never invoked. try/catch keeps any engine-state assumption it
-        // makes (refdef, cg_s) from killing the d3d9 hook.
-        if (Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo)
-        {
-            static bool gfx_failed_logged = false;
-            try
-            {
-                GFX::GraphicsManager::Get().Render();
-            }
-            catch (const std::exception& e)
-            {
-                if (!gfx_failed_logged)
-                {
-                    gfx_failed_logged = true;
-                    LOG_CRITICAL("GraphicsManager::Render threw std::exception: {} (further silenced)", e.what());
-                }
-            }
-            catch (...)
-            {
-                if (!gfx_failed_logged)
-                {
-                    gfx_failed_logged = true;
-                    LOG_CRITICAL("GraphicsManager::Render threw non-std exception (further silenced)");
-                }
-            }
-        }
-
-        if (!imguiRenderedThisFrame)
-        {
-            imguiRenderedThisFrame = true;
-            UI::UIManager::Get().RunImGuiFrame();
-        }
-
-        return EndScene(pDevice);
-
-        // Unreachable below — kept for restoration when we figure out the issue.
         if (CheckForOverlays(returnAddress))
         {
             return EndScene(pDevice);
@@ -338,40 +205,13 @@ namespace IWXMVM::D3D9
 
         if (Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo)
         {
-            // T4 port: GraphicsManager touches engine state (refdef_s, cg_s)
-            // we haven't wired yet. Catch + log once so it doesn't take down
-            // the d3d9 hook and leave the user staring at a fullscreen demo.
-            static bool gfx_failed_logged = false;
-            try
-            {
-                GFX::GraphicsManager::Get().Render();
-            }
-            catch (const std::exception& e)
-            {
-                if (!gfx_failed_logged)
-                {
-                    gfx_failed_logged = true;
-                    LOG_CRITICAL("GraphicsManager::Render threw std::exception: {} (further silenced)", e.what());
-                }
-            }
-            catch (...)
-            {
-                if (!gfx_failed_logged)
-                {
-                    gfx_failed_logged = true;
-                    LOG_CRITICAL("GraphicsManager::Render threw non-std exception (further silenced)");
-                }
-            }
+            GFX::GraphicsManager::Get().Render();
         }
 
-        // T4 port WIP: skip ImGui frame render in EndScene to diagnose whether
-        // overlay rendering is what's crashing the game. If WaW stays alive
-        // with this disabled, the crash is somewhere in the ImGui/IWXMVM UI
-        // rendering path; we'll re-enable component-by-component.
-        // if (!reshadeEndSceneAddress.has_value())
-        // {
-        //     UI::UIManager::Get().RunImGuiFrame();
-        // }
+        if (!reshadeEndSceneAddress.has_value())
+        {
+            UI::UIManager::Get().RunImGuiFrame();
+        }
 
         return EndScene(pDevice);
     }
@@ -464,28 +304,12 @@ namespace IWXMVM::D3D9
                                    HWND hDestWindowOverride, const RGNDATA* pDirtyRegion, DWORD dwFlags)
     {
         reshadeEndSceneCallCount = 0;
-        // T4 port: SwapChainPresent fires exactly once per frame, so reset
-        // the per-frame ImGui-render gate here. See EndScene_Hook for why.
-        imguiRenderedThisFrame = false;
         return SwapChainPresent(pDevice, pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
 
     }
 
     void CheckPresenceReshade()
     {
-        // T4 port WIP: skip ReShade detection. With detection on, the code
-        // routes RunImGuiFrame through ReshadeOriginalEndScene_Hook which
-        // doesn't render cleanly in our incomplete binding. Re-enable when
-        // we know what the user expects from ReShade+IWXMVM coexistence.
-        LOG_DEBUG("CheckPresenceReshade skipped (T4 port WIP)");
-        return;
-        // Null-safe: if game device pointer hasn't been wired up, skip Reshade
-        // detection (it requires reading the game device's vtable).
-        if (Mod::GetGameInterface()->GetGameDevicePtr() == nullptr)
-        {
-            LOG_WARN("CheckPresenceReshade skipped: game device pointer is null");
-            return;
-        }
         auto IsReshadeDllPresent = [](auto dllName) {
             const std::filesystem::path gamePath(PathUtils::GetCurrentGameDirectory());
             const auto reshadePath = gamePath / dllName;
@@ -540,27 +364,20 @@ namespace IWXMVM::D3D9
     {
         const auto device = Mod::GetGameInterface()->GetGameDevicePtr();
 
-        // Null-safe: skip cleanly if game device pointer not yet wired up
-        // (T4 port in progress; some sigs unresolved). SwapChain vtable stays
-        // zero-initialized so HookManager::CreateHook null-guard handles it.
-        if (!device)
-        {
-            LOG_WARN("FindSwapChain skipped: game device pointer is null");
-            return;
-        }
-
         IDirect3DSwapChain9* pSwapChain = nullptr;
         const HRESULT hr = device->GetSwapChain(0, &pSwapChain);
 
         if (FAILED(hr) || !pSwapChain)
         {
-            LOG_WARN("Failed to find D3D9 SwapChain (continuing)");
-            return;
+            throw std::runtime_error("Failed to find D3D9 SwapChain!");
         }
+        else
+        {
+            memcpy(d3d9SwapChainVTable, *(void**)pSwapChain, 10 * sizeof(void*));
+            pSwapChain->Release();
 
-        memcpy(d3d9SwapChainVTable, *(void**)pSwapChain, 10 * sizeof(void*));
-        pSwapChain->Release();
-        LOG_DEBUG("Found D3D9 SwapChain Present address: {}", d3d9SwapChainVTable[3]);
+            LOG_DEBUG("Found D3D9 SwapChain Present address: {}", d3d9SwapChainVTable[3]);
+        }
     }
 
     void CreateDummyDevice()
@@ -624,62 +441,20 @@ namespace IWXMVM::D3D9
                                     (std::uintptr_t)ReshadeOriginalEndScene_Hook,
                                     (std::uintptr_t*)&ReshadeOriginalEndScene);
         }
-
-        // T4 port: hook user32!GetCursorPos so the game polls a frozen value
-        // while IWXMVM has input capture. See GetCursorPos_Hook above.
-        if (auto getCursorPosAddr = GetProcAddress(GetModuleHandleA("user32.dll"), "GetCursorPos"))
-        {
-            HookManager::CreateHook((std::uintptr_t)getCursorPosAddr,
-                                    (std::uintptr_t)GetCursorPos_Hook,
-                                    (std::uintptr_t*)&OriginalGetCursorPos);
-            LOG_DEBUG("Hooked user32!GetCursorPos at {:p}", (void*)getCursorPosAddr);
-        }
-        else
-        {
-            LOG_WARN("Failed to resolve user32!GetCursorPos — input freeze will not work");
-        }
-
-        // T4 port: hook SetCursorPos so WaW's IN_Frame re-centering is
-        // suppressed when IWXMVM owns input. See SetCursorPos_Hook above.
-        if (auto setCursorPosAddr = GetProcAddress(GetModuleHandleA("user32.dll"), "SetCursorPos"))
-        {
-            HookManager::CreateHook((std::uintptr_t)setCursorPosAddr,
-                                    (std::uintptr_t)SetCursorPos_Hook,
-                                    (std::uintptr_t*)&OriginalSetCursorPos);
-            LOG_DEBUG("Hooked user32!SetCursorPos at {:p}", (void*)setCursorPosAddr);
-        }
-        else
-        {
-            LOG_WARN("Failed to resolve user32!SetCursorPos — cursor recentering will not be suppressed");
-        }
     }
 
     void Initialize()
     {
         FindSwapChain();
         CreateDummyDevice();
-        // T4 port diagnostic: install ALL hooks again, but EndScene_Hook is still
-        // a pass-through body. If still stable -> OTHER hooks were never the issue;
-        // EndScene body is. If crashes -> one of the OTHER hooks is broken.
         Hook();
         LOG_DEBUG("Hooked D3D9");
 
-        // T4 port: skip vid_restart. The original path uses it to force device
-        // re-creation so CreateDevice_Hook fires and we get the game's device,
-        // but our injector loads AFTER the game has booted — the device
-        // already exists. EndScene_Hook will pick it up on the next frame via
-        // the `device = pDevice` path. Triggering vid_restart here crashed the
-        // game on first frame after device destruction (memory state shifting
-        // during render).
-        //
-        // TODO: re-enable when game device pointer + WndProc are wired
-        //       (or detect reshade properly first).
-        // if (!IsReshadePresent())
-        // {
-        //     LOG_DEBUG("Triggering vid_restart since Reshade is not present");
-        //     Mod::GetGameInterface()->Vid_Restart();
-        // }
-        LOG_DEBUG("Skipping vid_restart (T4 port WIP)");
+        if (!IsReshadePresent())
+        {
+            LOG_DEBUG("Triggering vid_restart since Reshade is not present");
+            Mod::GetGameInterface()->Vid_Restart();
+        }
     }
 
     HWND FindWindowHandle()
