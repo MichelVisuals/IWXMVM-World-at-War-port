@@ -204,16 +204,6 @@ namespace IWXMVM::UI
         }
     }
 
-    // T4 port (2026-05-23): flag the SetCursorPos hook (in D3D9.cpp) when
-    // LockMouse is the caller, so the hook lets the centering through even
-    // while our blanket demo-time SetCursorPos suppression is active. The
-    // suppression exists to keep WaW's IN_Frame from re-centering the cursor
-    // and stealing it from the IWXMVM overlay; LockMouse is a different,
-    // legitimate caller that the suppression must NOT block, otherwise
-    // ImGui's MouseDelta gets a permanent (cursor - viewportCenter) phantom
-    // delta and the freecam spins continuously.
-    std::atomic<bool> g_setCursorPosFromLockMouse{false};
-
     void GameView::LockMouse()
     {
         // calling FindWindowHandle every frame here is probably not a good idea
@@ -225,9 +215,7 @@ namespace IWXMVM::UI
         ImVec2 viewportCenter = ImVec2(glm::floor(windowPosition.x + GetPosition().x + GetSize().x / 2),
                                        glm::floor(windowPosition.y + GetPosition().y + GetSize().y / 2));
         ImGui::GetIO().MousePosPrev += ImVec2(viewportCenter.x - cursorPosition.x, viewportCenter.y - cursorPosition.y);
-        g_setCursorPosFromLockMouse.store(true, std::memory_order_release);
         SetCursorPos(static_cast<int32_t>(viewportCenter.x), static_cast<int32_t>(viewportCenter.y));
-        g_setCursorPosFromLockMouse.store(false, std::memory_order_release);
     }
 
     void GameView::Initialize()
@@ -387,23 +375,7 @@ namespace IWXMVM::UI
         auto viewportSize = ImGui::GetContentRegionMax();
         viewportSize.y -= topBarHeight;
 
-        // T4 port: always show the GameView in a 16:9 box, regardless of
-        // WaW's native render aspect ratio. Crop whichever dimension is too
-        // large (so the box never overflows the IWXMVM frame), then make
-        // the texture exactly fill the box. The StretchRect inside
-        // CaptureBackBuffer + ImGui::Image will rescale the captured
-        // backbuffer to fit. If WaW runs at 21:9 (ultrawide), content is
-        // squashed slightly until we add a forced render-aspect dvar or
-        // projection override (see project-iwxmvm-recording-aspect memory).
-        // The original ClampImage() variant — which letterboxed the
-        // texture to the game's native aspect — is intentionally NOT used.
-        constexpr float TARGET_ASPECT = 16.0f / 9.0f;
-        if (viewportSize.x / viewportSize.y > TARGET_ASPECT)
-            viewportSize.x = viewportSize.y * TARGET_ASPECT;
-        else
-            viewportSize.y = viewportSize.x / TARGET_ASPECT;
-
-        auto newTextureSize = viewportSize;
+        auto newTextureSize = ClampImage(viewportSize);
         if (textureSize.x != newTextureSize.x || textureSize.y != newTextureSize.y)
         {
             textureSize = newTextureSize;
@@ -414,13 +386,9 @@ namespace IWXMVM::UI
         // otherwise, for a brief second, you'd see the first frame of the demo
         if (!Components::Rewinding::IsRewinding())
         {
-            // CaptureBackBuffer failure used to throw; swallow instead so a
-            // transient device-lost / format-mismatch frame doesn't tear
-            // down the whole UI render path. The next frame retries.
             if (!D3D9::CaptureBackBuffer(texture))
             {
-                static bool warned = false;
-                if (!warned) { warned = true; LOG_WARN("GameView: CaptureBackBuffer failed (suppressed; will retry next frame)"); }
+                throw std::exception("Failed to capture game view");
             }
         }
 

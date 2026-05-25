@@ -84,35 +84,7 @@ namespace IWXMVM::UI
             std::string iwxmvmText = std::format(
                 "IWXMVM {0} | {1}", IWXMVM_VERSION, magic_enum::enum_name(Mod::GetGameInterface()->GetGame())
             );
-
-            // T4 port: clickable input-ownership toggle, sits just left of
-            // the version label. Hotkey is INSERT (handled in ImGuiWndProc).
-            const bool captured = UIManager::Get().IsInputCaptured();
-            const char* label = captured ? "Input: IWXMVM" : "Input: Game";
-            // Color the button differently per state so the current mode is
-            // unmissable: greenish when game owns input, orangeish when
-            // IWXMVM does.
-            const ImVec4 normal  = ImVec4(0.20f, 0.55f, 0.25f, 1.0f);
-            const ImVec4 normalH = ImVec4(0.30f, 0.70f, 0.35f, 1.0f);
-            const ImVec4 normalA = ImVec4(0.15f, 0.45f, 0.20f, 1.0f);
-            const ImVec4 active  = ImVec4(0.80f, 0.50f, 0.10f, 1.0f);
-            const ImVec4 activeH = ImVec4(0.95f, 0.65f, 0.20f, 1.0f);
-            const ImVec4 activeA = ImVec4(0.70f, 0.40f, 0.05f, 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_Button,        captured ? active  : normal);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, captured ? activeH : normalH);
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive,  captured ? activeA : normalA);
-
-            const auto buttonText = std::string(label) + " (Insert)";
-            const float buttonW = ImGui::CalcTextSize(buttonText.c_str()).x + ImGui::GetStyle().FramePadding.x * 2.0f;
-            const float versionW = ImGui::CalcTextSize(iwxmvmText.c_str()).x + ImGui::CalcTextSize(" ").x;
-            ImGui::SetCursorPosX(windowSize.x - versionW - buttonW - ImGui::GetStyle().ItemSpacing.x * 2.0f);
-            if (ImGui::Button(buttonText.c_str()))
-            {
-                UIManager::Get().ToggleInputCaptured();
-            }
-            ImGui::PopStyleColor(3);
-
-            ImGui::SetCursorPosX(windowSize.x - versionW);
+            ImGui::SetCursorPosX(windowSize.x - ImGui::CalcTextSize(iwxmvmText.c_str()).x - ImGui::CalcTextSize(" ").x);
             ImGui::Text(iwxmvmText.c_str());
 
             ImGui::EndMainMenuBar();

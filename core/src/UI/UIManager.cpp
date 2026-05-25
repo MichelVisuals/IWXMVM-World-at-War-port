@@ -103,32 +103,16 @@ namespace IWXMVM::UI
         }
         catch (...)
         {
-            // Log once per process — the upstream MessageBox popped every
-            // frame the catch fired, which froze the user behind a popup
-            // wall when a hot path threw repeatedly.
-            static bool logged_once = false;
-            if (!logged_once)
-            {
-                logged_once = true;
-                LOG_CRITICAL("An error occurred while rendering the IWXMVM user interface (further occurrences will be silent)");
-            }
+            LOG_CRITICAL("An error occurred while rendering the IWXMVM user interface");
+
+            // TODO: panic function
+            MessageBox(NULL, "An error occurred while rendering the IWXMVM user interface", "FATAL ERROR", MB_OK);
         }
     }
 
     HRESULT ImGuiWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         auto& uiManager = UIManager::Get();
-
-        // Insert key toggles whether IWXMVM owns input (same toggle as the
-        // menu-bar button). Handled before the capture-filter below so it
-        // can always turn capture OFF.
-        if (uMsg == WM_KEYDOWN && wParam == VK_INSERT)
-        {
-            uiManager.ToggleInputCaptured();
-            LOG_DEBUG("IWXMVM input captured: {} (Insert pressed)", uiManager.IsInputCaptured());
-            return 0;
-        }
-
         auto& gameView = uiManager.GetUIComponent(UI::Component::GameView);
         if (gameView->HasFocus() && uiManager.IsControllableCameraModeSelected())
         {
@@ -144,22 +128,6 @@ namespace IWXMVM::UI
         if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
         {
             return true;
-        }
-
-        // When IWXMVM owns input, swallow mouse + keyboard messages so they
-        // don't reach the game's WndProc. WndProc-level substitute for the
-        // IN_Frame engine patch when that patch isn't wired for a given
-        // game binding.
-        if (uiManager.IsInputCaptured())
-        {
-            const bool isMouseMsg = (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST);
-            const bool isKeyboardMsg = (uMsg == WM_KEYDOWN || uMsg == WM_KEYUP ||
-                                        uMsg == WM_SYSKEYDOWN || uMsg == WM_SYSKEYUP ||
-                                        uMsg == WM_CHAR);
-            const bool isRawInput = (uMsg == WM_INPUT);
-            const bool isCursorMsg = (uMsg == WM_SETCURSOR);
-            if (isMouseMsg || isKeyboardMsg || isRawInput || isCursorMsg)
-                return 0;
         }
 
         return CallWindowProc(uiManager.GetOriginalGameWndProc(), hWnd, uMsg, wParam, lParam);
