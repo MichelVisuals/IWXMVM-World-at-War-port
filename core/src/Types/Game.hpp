@@ -5,7 +5,6 @@ namespace IWXMVM::Types
     enum class Game
     {
         None,
-        IW3,
-        T4
+        IW3
     };
 }  // namespace IWXMVM::Types

@@ -198,15 +198,6 @@ namespace IWXMVM::Components::Rewinding
 
     void RewindBy(std::int32_t ticks)
     {
-        // Skip when the binding doesn't yet support seek/rewind (t4 until
-        // FS_Read + Rewinding state-machine deps are wired). Without this,
-        // RewindBy succeeds at setting the rewindTo atomic but
-        // RestoreOldGamestate never fires to clear it -> IsRewinding()=true
-        // forever -> GameView::Draw stops calling CaptureBackBuffer ->
-        // captured panel freezes (the demo itself keeps playing fine).
-        if (!(Mod::GetGameInterface()->GetSupportedFeatures() & Types::Features_Rewinding))
-            return;
-
         if (Playback::IsGameFrozen())
         {
             Playback::SetTimelineTick(Playback::GetTimelineTick() + ticks);

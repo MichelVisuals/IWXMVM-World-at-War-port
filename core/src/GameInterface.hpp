@@ -91,12 +91,6 @@ namespace IWXMVM
         virtual void ResetClientData(int serverTime) = 0;
         virtual Types::PlaybackData GetPlaybackDataAddresses() const = 0;
 
-        // SeekBackward — fallback for bindings that support skip-forward only.
-        // Called by SetTickDelta when value < 0 and Features_Rewinding is
-        // clear. Default no-op; t4 implements via demo restart + deferred
-        // SkipDemoForward.
-        virtual void SeekBackward(std::int32_t /*deltaTicks*/) {}
-
        private:
         Types::Game game;
     };
