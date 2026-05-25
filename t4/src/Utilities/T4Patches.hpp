@@ -1,17 +1,25 @@
 #pragma once
 #include "StdInclude.hpp"
 
-namespace IWXMVM::Patches
+// T4-local fork of core's Patches.hpp. Vendored because core/ stays 1:1
+// with upstream IWXMVM, which asserts on null _dst and crashes on Apply()
+// against a null pointer. t4 has 28 unresolved HardAddr<0> patch sites;
+// the null-guard makes those inert instead of fatal.
+//
+// API identical to upstream IWXMVM::Patches but lives in IWXMVM::T4::Patches
+// so t4/Patches.hpp can `using namespace IWXMVM::T4::Patches;`.
+
+namespace IWXMVM::T4::Patches
 {
     inline constexpr std::uint8_t HexToDecimal(char c)
     {
         constexpr std::array<std::uint8_t, 4> boundaries{'0', '9', 'A', 'F'};
         const std::uint8_t val = static_cast<std::uint8_t>(c);
 
-        if (val >= boundaries[0] && val <= boundaries[1])  // 0-9
+        if (val >= boundaries[0] && val <= boundaries[1])
             return val - boundaries[0];
 
-        if (val >= boundaries[2] && val <= boundaries[3])  // A-F
+        if (val >= boundaries[2] && val <= boundaries[3])
             return val - boundaries[2] + 10;
 
         throw std::runtime_error("Not a hexadecimal value.");
@@ -64,9 +72,10 @@ namespace IWXMVM::Patches
         Patch(std::uintptr_t dst, std::array<std::uint8_t, length> bytes, PatchApplySetting setting = {})
             : _dst(reinterpret_cast<std::uint8_t*>(dst)), _src(bytes)
         {
-            assert(_dst != nullptr);
-
-            if (setting != PatchApplySetting::Deferred)
+            // Resilient: null dst means the signature didn't resolve. Skip
+            // silently — Apply()/Revert() also guard against null so the patch
+            // is just inert.
+            if (_dst != nullptr && setting != PatchApplySetting::Deferred)
                 Apply();
         }
 
@@ -82,6 +91,7 @@ namespace IWXMVM::Patches
 
         void Apply()
         {
+            if (_dst == nullptr) return;
             if (!_active)
             {
                 DWORD oldProtection;
@@ -97,6 +107,7 @@ namespace IWXMVM::Patches
 
         void Revert()
         {
+            if (_dst == nullptr) return;
             if (_active)
             {
                 DWORD oldProtection;
@@ -135,7 +146,6 @@ namespace IWXMVM::Patches
         static constexpr std::uint8_t RETURN_OPCODE = 0xC3;
     };
 
-    
     template <std::uint8_t value>
     class ReturnValuePatch : public Patch<3>
     {
@@ -152,7 +162,6 @@ namespace IWXMVM::Patches
             tmp[0] = RETURN_OPCODE;
             tmp[1] = value;
             tmp[2] = 0x00;
-
             return tmp;
         }();
     };
@@ -183,8 +192,7 @@ namespace IWXMVM::Patches
         static constexpr auto _bytes = []() {
             std::array<std::uint8_t, count> tmp;
             tmp.fill(NOP_OPCODE);
-
             return tmp;
         }();
     };
-}  // namespace IWXMVM::Patches
+}  // namespace IWXMVM::T4::Patches

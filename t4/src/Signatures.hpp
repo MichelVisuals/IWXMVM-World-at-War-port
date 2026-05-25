@@ -1,16 +1,20 @@
 #pragma once
 #include "StdInclude.hpp"
-#include "Utilities/Signatures.hpp"
+#include "Utilities/T4Sig.hpp"
 
 namespace IWXMVM::T4::Signatures
 {
     struct T4Addresses
     {
-#define Sig IWXMVM::Signatures::Signature < IWXMVM::Signatures::SignatureImpl
-#define HAddr IWXMVM::Signatures::HardAddr
-#define Lambda IWXMVM::Signatures::Lambdas
+        // T4-local scanner (see T4Sig.hpp). core/Utilities/Signatures.hpp
+        // stays 1:1 with upstream — t4 can't use it because the upstream
+        // scanner crashes on CoDWaWmp.exe's sparse .data section and throws
+        // on every unverified signature (and HardAddr doesn't exist there).
+#define Sig IWXMVM::T4::Signatures::Signature < IWXMVM::T4::Signatures::SignatureImpl
+#define HAddr IWXMVM::T4::Signatures::HardAddr
+#define Lambda IWXMVM::T4::Signatures::Lambdas
 
-        using GAType = IWXMVM::Signatures::GameAddressType;
+        using GAType = IWXMVM::T4::Signatures::GameAddressType;
 
         // ============================================================
         // T4 (WaW) port: signature table

@@ -1,7 +1,7 @@
 #include "StdInclude.hpp"
 #include "Camera.hpp"
 
-#include "Utilities/HookManager.hpp"
+#include "Utilities/T4HookManager.hpp"
 #include "Utilities/MathUtils.hpp"
 #include "../Structures.hpp"
 #include "../Functions.hpp"
@@ -177,7 +177,7 @@ namespace IWXMVM::T4::Hooks::Camera
             LOG_WARN("Hooks::Camera::InstallRefdefOnly: R_SetViewParmsForScene address is 0, skipping");
             return;
         }
-        HookManager::CreateHook(rsvp_va, (uintptr_t)R_SetViewParmsForScene_Hook,
+        T4::HookManager::CreateHook(rsvp_va, (uintptr_t)R_SetViewParmsForScene_Hook,
                                 &R_SetViewParmsForScene_Trampoline);
         LOG_INFO("Hooks::Camera::InstallRefdefOnly: installed at 0x{:08X}", rsvp_va);
     }
@@ -185,23 +185,23 @@ namespace IWXMVM::T4::Hooks::Camera
     void Install()
     {
         // rewrite the camera position and fov
-        HookManager::CreateHook(GetGameAddresses().R_SetViewParmsForScene(), (uintptr_t)R_SetViewParmsForScene_Hook,
+        T4::HookManager::CreateHook(GetGameAddresses().R_SetViewParmsForScene(), (uintptr_t)R_SetViewParmsForScene_Hook,
                                 &R_SetViewParmsForScene_Trampoline);
 
         // rewrite the camera angles
         AnglesToAxis_Address = GetGameAddresses().AnglesToAxis();
-        HookManager::WriteCall(GetGameAddresses().CG_CalcViewValues(), (uintptr_t)AnglesToAxis_Hook);
-        HookManager::WriteCall(GetGameAddresses().CG_OffsetThirdPersonView(), (uintptr_t)AnglesToAxis_Hook);
+        T4::HookManager::WriteCall(GetGameAddresses().CG_CalcViewValues(), (uintptr_t)AnglesToAxis_Hook);
+        T4::HookManager::WriteCall(GetGameAddresses().CG_OffsetThirdPersonView(), (uintptr_t)AnglesToAxis_Hook);
 
         // update position of world-space effects (such as smoke) with our new position
-        HookManager::CreateHook(GetGameAddresses().FX_SetupCamera(), (uintptr_t)FX_SetupCamera_Hook,
+        T4::HookManager::CreateHook(GetGameAddresses().FX_SetupCamera(), (uintptr_t)FX_SetupCamera_Hook,
                                 &FX_SetupCamera_Trampoline);
 
         // TODO: CG_CalcFov
         // TODO: bypass connection interrupted (CI) image / message by placing a return statement at 0x42F930
 
         // ignore writes to camera angles (this fixes things like the player knifing affecting the freecam)
-        HookManager::CreateHook(GetGameAddresses().CG_DObjGetWorldTagMatrix(), (uintptr_t)CG_DObjGetWorldTagMatrix_Hook,
+        T4::HookManager::CreateHook(GetGameAddresses().CG_DObjGetWorldTagMatrix(), (uintptr_t)CG_DObjGetWorldTagMatrix_Hook,
                                 &CG_DObjGetWorldTagMatrix_Trampoline);
     }
 

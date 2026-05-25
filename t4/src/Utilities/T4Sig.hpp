@@ -2,7 +2,23 @@
 #include "StdInclude.hpp"
 #include "Mod.hpp"
 
-namespace IWXMVM::Signatures
+// T4-local fork of core's Signatures.hpp. Vendored because core/ stays 1:1
+// with upstream IWXMVM (no VirtualQuery-aware scanner, throws on miss, no
+// HardAddr) but t4 needs all three to function:
+//
+// 1. CoDWaWmp.exe has a huge virtual .data section with many uncommitted /
+//    PAGE_NOACCESS pages. Reading those triggers an access violation that
+//    takes down init — upstream's linear scan crashes; this scanner walks
+//    only committed readable regions via VirtualQuery.
+// 2. Many T4 signatures are unverified placeholders; throwing on miss
+//    kills the whole init pass. Return 0 on miss + log a warning instead.
+// 3. HardAddr<address> is the API-compatible alternative for addresses
+//    confirmed via external RE (Ghidra, t4-rtx).
+//
+// This is intentionally a near-duplicate of upstream's Signatures.hpp —
+// any upstream improvements should be backported manually.
+
+namespace IWXMVM::T4::Signatures
 {
     namespace Lambdas
     {
@@ -157,6 +173,10 @@ namespace IWXMVM::Signatures
 
     inline std::uintptr_t SignatureScanner(const auto& signature, const auto& moduleHandles)
     {
+        constexpr DWORD READABLE =
+            PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+            PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
         for (const auto handle : moduleHandles)
         {
             MODULEINFO process{};
@@ -165,21 +185,44 @@ namespace IWXMVM::Signatures
                 !process.lpBaseOfDll)
                 return 0;
 
-            const std::uintptr_t endOfDll = reinterpret_cast<std::uintptr_t>(process.lpBaseOfDll) + process.SizeOfImage;
+            const std::uintptr_t imageBase = reinterpret_cast<std::uintptr_t>(process.lpBaseOfDll);
+            const std::uintptr_t endOfDll = imageBase + process.SizeOfImage;
+            const std::size_t sigLen = signature._bytes.size();
 
-            for (std::uintptr_t i = reinterpret_cast<std::uintptr_t>(process.lpBaseOfDll); i < endOfDll; ++i)
+            std::uintptr_t i = imageBase;
+            while (i < endOfDll)
             {
-                std::size_t j = signature._frontMaskCount;
+                MEMORY_BASIC_INFORMATION mbi{};
+                if (::VirtualQuery(reinterpret_cast<LPCVOID>(i), &mbi, sizeof(mbi)) == 0)
+                    break;
 
-                for (; j < signature._bytes.size(); ++j)
+                const std::uintptr_t regionStart = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+                const std::uintptr_t regionEnd = regionStart + mbi.RegionSize;
+
+                const bool readable = (mbi.State == MEM_COMMIT) && ((mbi.Protect & READABLE) != 0) &&
+                                      ((mbi.Protect & PAGE_GUARD) == 0);
+
+                if (!readable)
                 {
-                    if (signature._bytes[j] != maskValue &&
-                        signature._bytes[j] != *reinterpret_cast<std::uint8_t*>(i + j))
-                        break;
+                    i = regionEnd;
+                    continue;
                 }
 
-                if (j == signature._bytes.size())
-                    return i + signature._offset;
+                const std::uintptr_t scanEnd = (regionEnd > sigLen) ? (regionEnd - sigLen) : 0;
+                const std::uintptr_t scanLimit = (scanEnd < endOfDll) ? scanEnd : endOfDll;
+                for (; i <= scanLimit; ++i)
+                {
+                    std::size_t j = signature._frontMaskCount;
+                    for (; j < sigLen; ++j)
+                    {
+                        if (signature._bytes[j] != maskValue &&
+                            signature._bytes[j] != *reinterpret_cast<std::uint8_t*>(i + j))
+                            break;
+                    }
+                    if (j == sigLen)
+                        return i + signature._offset;
+                }
+                i = regionEnd;
             }
         }
 
@@ -209,30 +252,32 @@ namespace IWXMVM::Signatures
             const std::uintptr_t address = SignatureScanner(*this, moduleHandles);
 
             if (address == 0)
-                throw std::runtime_error(std::format("Failed to find signature:\n\t {}", _string.data()));
+            {
+                LOG_WARN("Signature scan failed (continuing): {}", _string.data());
+                return std::uintptr_t{0};
+            }
+
+            if constexpr (requires { std::declval<Callable>()(address); })
+            {
+                try
+                {
+                    const std::uintptr_t newAddress = _callable(address);
+                    if (newAddress == 0)
+                    {
+                        LOG_WARN("Signature post-process returned 0: {}", _string.data());
+                        return std::uintptr_t{0};
+                    }
+                    return newAddress;
+                }
+                catch (...)
+                {
+                    LOG_WARN("Signature post-process threw: {}", _string.data());
+                    return std::uintptr_t{0};
+                }
+            }
             else
             {
-                if constexpr (requires { std::declval<Callable>()(address); })
-                {
-                    try
-                    {
-                        const std::uintptr_t newAddress = _callable(address);
-                        if (newAddress == 0)
-                            throw std::runtime_error(std::format(
-                                "Failed to find correct game address (1), signature:\n\t {}", _string.data()));
-
-                        return newAddress;
-                    }
-                    catch (...)
-                    {
-                        throw std::runtime_error(
-                            std::format("Failed to find correct game address (2), signature:\n\t {}", _string.data()));
-                    }
-
-                    return std::uintptr_t{};
-                }
-                else
-                    return address;
+                return address;
             }
         }
 
@@ -265,4 +310,12 @@ namespace IWXMVM::Signatures
             return _address;
         }
     };
-}  // namespace IWXMVM::Signatures
+
+    template <std::uintptr_t address>
+    struct HardAddr
+    {
+        constexpr HardAddr() = default;
+        constexpr std::uintptr_t operator()() const { return address; }
+        constexpr std::uintptr_t GetAddress() const { return address; }
+    };
+}  // namespace IWXMVM::T4::Signatures

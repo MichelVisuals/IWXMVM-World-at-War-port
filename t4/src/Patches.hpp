@@ -1,11 +1,16 @@
 #pragma once
 #include "StdInclude.hpp"
 #include "Addresses.hpp"
-#include "../src/Utilities/Patches.hpp"
+#include "Utilities/T4Patches.hpp"
 
 namespace IWXMVM::T4::Patches
 {
-    using namespace IWXMVM::Patches;
+    // T4-local Patch with null-guards (see Utilities/T4Patches.hpp). core/
+    // Utilities/Patches.hpp stays 1:1 with upstream, which asserts on null
+    // _dst and would crash Apply() against any HardAddr<0> entry in t4's
+    // address table. The Patch/ReturnPatch/JumpPatch/NopPatch/ReturnValuePatch
+    // class names are already in this namespace via the same-named namespace
+    // declaration in T4Patches.hpp, so no using-directive is needed.
 
     struct T4Patches
     {

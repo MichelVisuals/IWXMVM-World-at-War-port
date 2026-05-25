@@ -47,48 +47,30 @@ namespace IWXMVM::HookManager
 
     bool WriteJump(std::uintptr_t from, std::uintptr_t to)
     {
-        if (from == 0 || to == 0)
-        {
-            LOG_WARN("WriteJump skipped: null address (from={:X} to={:X})", from, to);
-            return false;
-        }
         return WriteJumpInternal(from, to, JUMP_LENGTH, JUMP_OPCODE);
     }
 
     bool WriteCall(std::uintptr_t from, std::uintptr_t to)
     {
-        if (from == 0 || to == 0)
-        {
-            LOG_WARN("WriteCall skipped: null address (from={:X} to={:X})", from, to);
-            return false;
-        }
         return WriteJumpInternal(from, to, JUMP_LENGTH, CALL_OPCODE);
     }
 
     void CreateHook(std::uintptr_t originalPtr, std::uintptr_t detourPtr, std::uintptr_t* trampolinePtr)
     {
-        // Resilient: null originalPtr means the underlying sig didn't resolve. Skip
-        // silently — the trampoline stays null so any code that uses it will get
-        // a fast-fail rather than a corrupted trampoline.
-        if (originalPtr == 0)
-        {
-            LOG_WARN("CreateHook skipped: null originalPtr (detour={:X})", detourPtr);
-            if (trampolinePtr) *trampolinePtr = 0;
-            return;
-        }
-
         auto result = MH_CreateHook((void*)originalPtr, (void*)detourPtr, (void**)trampolinePtr);
         if (result != MH_OK)
         {
-            LOG_WARN("MH_CreateHook failed for {:X}: {} (continuing)", originalPtr, magic_enum::enum_name(result));
-            if (trampolinePtr) *trampolinePtr = 0;
-            return;
+            throw std::runtime_error(
+                std::format("Failed to create hook for address {:X}: {}", originalPtr, magic_enum::enum_name(result)).c_str()
+            );
         }
 
         result = MH_EnableHook((void*)originalPtr);
         if (result != MH_OK)
         {
-            LOG_WARN("MH_EnableHook failed for {:X}: {} (continuing)", originalPtr, magic_enum::enum_name(result));
+            throw std::runtime_error(
+                std::format("Failed to enable hook for address {:X}: {}", originalPtr, magic_enum::enum_name(result))
+                    .c_str());
         }
     }
 

@@ -3,7 +3,7 @@
 
 #include "Components/Playback.hpp"
 #include "Components/Rewinding.hpp"
-#include "Utilities/HookManager.hpp"
+#include "Utilities/T4HookManager.hpp"
 #include "Events.hpp"
 #include "../Addresses.hpp"
 #include "../Structures.hpp"
@@ -92,7 +92,7 @@ namespace IWXMVM::T4::Hooks::Playback
         const auto sv_frame_va = GetGameAddresses().SV_Frame();
         if (sv_frame_va)
         {
-            HookManager::CreateHook(sv_frame_va, (std::uintptr_t)SV_Frame_Hook,
+            T4::HookManager::CreateHook(sv_frame_va, (std::uintptr_t)SV_Frame_Hook,
                                     (uintptr_t*)&SV_Frame_Trampoline);
             LOG_INFO("Hooks::Playback: SV_Frame hook installed at 0x{:08X}", sv_frame_va);
         }

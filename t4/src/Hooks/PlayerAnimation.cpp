@@ -5,7 +5,7 @@
 #include "../Structures.hpp"
 #include "Components/PlayerAnimation.hpp"
 #include "Mod.hpp"
-#include "Utilities/HookManager.hpp"
+#include "Utilities/T4HookManager.hpp"
 
 namespace IWXMVM::T4::Hooks::PlayerAnimation
 {    
@@ -148,7 +148,7 @@ namespace IWXMVM::T4::Hooks::PlayerAnimation
 
     void Install()
     {
-        HookManager::CreateHook(GetGameAddresses().CG_ProcessEntity(), (std::uintptr_t)CG_ProcessEntity_Hook,
+        T4::HookManager::CreateHook(GetGameAddresses().CG_ProcessEntity(), (std::uintptr_t)CG_ProcessEntity_Hook,
                                 &CG_ProcessEntity_Trampoline);
     }
 }  // namespace IWXMVM::T4::Hooks::PlayerAnimation
