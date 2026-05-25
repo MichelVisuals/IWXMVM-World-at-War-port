@@ -13,7 +13,6 @@ namespace IWXMVM::Components::Playback
     void TogglePaused()
     {
         isPlaybackPaused = !isPlaybackPaused;
-        LOG_DEBUG("Playback::TogglePaused -> isPlaybackPaused={}", isPlaybackPaused);
     }
 
     bool IsPaused()
