@@ -135,12 +135,8 @@
     <ClInclude Include="src\Hooks\Playback.hpp" />
     <ClInclude Include="src\Hooks\PlayerAnimation.hpp" />
     <ClInclude Include="src\Hooks\Rendering.hpp" />
-    <ClInclude Include="src\Patches.hpp" />
     <ClInclude Include="src\Signatures.hpp" />
     <ClInclude Include="src\Structures.hpp" />
-    <ClInclude Include="src\Utilities\T4HookManager.hpp" />
-    <ClInclude Include="src\Utilities\T4Patches.hpp" />
-    <ClInclude Include="src\Utilities\T4Sig.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

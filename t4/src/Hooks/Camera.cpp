@@ -1,7 +1,7 @@
 #include "StdInclude.hpp"
 #include "Camera.hpp"
 
-#include "Utilities/T4HookManager.hpp"
+#include "Utilities/HookManager.hpp"
 #include "Utilities/MathUtils.hpp"
 #include "../Structures.hpp"
 #include "../Functions.hpp"
@@ -177,32 +177,59 @@ namespace IWXMVM::T4::Hooks::Camera
             LOG_WARN("Hooks::Camera::InstallRefdefOnly: R_SetViewParmsForScene address is 0, skipping");
             return;
         }
-        T4::HookManager::CreateHook(rsvp_va, (uintptr_t)R_SetViewParmsForScene_Hook,
-                                &R_SetViewParmsForScene_Trampoline);
-        LOG_INFO("Hooks::Camera::InstallRefdefOnly: installed at 0x{:08X}", rsvp_va);
+        try
+        {
+            IWXMVM::HookManager::CreateHook(rsvp_va, (uintptr_t)R_SetViewParmsForScene_Hook,
+                                            &R_SetViewParmsForScene_Trampoline);
+            LOG_INFO("Hooks::Camera::InstallRefdefOnly: installed at 0x{:08X}", rsvp_va);
+        }
+        catch (const std::exception& e)
+        {
+            LOG_WARN("Hooks::Camera::InstallRefdefOnly: CreateHook failed: {}", e.what());
+        }
     }
 
     void Install()
     {
         // rewrite the camera position and fov
-        T4::HookManager::CreateHook(GetGameAddresses().R_SetViewParmsForScene(), (uintptr_t)R_SetViewParmsForScene_Hook,
-                                &R_SetViewParmsForScene_Trampoline);
+        if (const auto a = GetGameAddresses().R_SetViewParmsForScene(); a)
+        {
+            try { IWXMVM::HookManager::CreateHook(a, (uintptr_t)R_SetViewParmsForScene_Hook,
+                                                  &R_SetViewParmsForScene_Trampoline); }
+            catch (const std::exception& e) { LOG_WARN("Camera::Install R_SetViewParmsForScene: {}", e.what()); }
+        }
 
         // rewrite the camera angles
         AnglesToAxis_Address = GetGameAddresses().AnglesToAxis();
-        T4::HookManager::WriteCall(GetGameAddresses().CG_CalcViewValues(), (uintptr_t)AnglesToAxis_Hook);
-        T4::HookManager::WriteCall(GetGameAddresses().CG_OffsetThirdPersonView(), (uintptr_t)AnglesToAxis_Hook);
+        if (const auto a = GetGameAddresses().CG_CalcViewValues(); a)
+        {
+            try { IWXMVM::HookManager::WriteCall(a, (uintptr_t)AnglesToAxis_Hook); }
+            catch (const std::exception& e) { LOG_WARN("Camera::Install CG_CalcViewValues: {}", e.what()); }
+        }
+        if (const auto a = GetGameAddresses().CG_OffsetThirdPersonView(); a)
+        {
+            try { IWXMVM::HookManager::WriteCall(a, (uintptr_t)AnglesToAxis_Hook); }
+            catch (const std::exception& e) { LOG_WARN("Camera::Install CG_OffsetThirdPersonView: {}", e.what()); }
+        }
 
         // update position of world-space effects (such as smoke) with our new position
-        T4::HookManager::CreateHook(GetGameAddresses().FX_SetupCamera(), (uintptr_t)FX_SetupCamera_Hook,
-                                &FX_SetupCamera_Trampoline);
+        if (const auto a = GetGameAddresses().FX_SetupCamera(); a)
+        {
+            try { IWXMVM::HookManager::CreateHook(a, (uintptr_t)FX_SetupCamera_Hook,
+                                                  &FX_SetupCamera_Trampoline); }
+            catch (const std::exception& e) { LOG_WARN("Camera::Install FX_SetupCamera: {}", e.what()); }
+        }
 
         // TODO: CG_CalcFov
         // TODO: bypass connection interrupted (CI) image / message by placing a return statement at 0x42F930
 
         // ignore writes to camera angles (this fixes things like the player knifing affecting the freecam)
-        T4::HookManager::CreateHook(GetGameAddresses().CG_DObjGetWorldTagMatrix(), (uintptr_t)CG_DObjGetWorldTagMatrix_Hook,
-                                &CG_DObjGetWorldTagMatrix_Trampoline);
+        if (const auto a = GetGameAddresses().CG_DObjGetWorldTagMatrix(); a)
+        {
+            try { IWXMVM::HookManager::CreateHook(a, (uintptr_t)CG_DObjGetWorldTagMatrix_Hook,
+                                                  &CG_DObjGetWorldTagMatrix_Trampoline); }
+            catch (const std::exception& e) { LOG_WARN("Camera::Install CG_DObjGetWorldTagMatrix: {}", e.what()); }
+        }
     }
 
     void OnCameraChanged()

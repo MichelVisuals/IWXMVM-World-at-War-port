@@ -3,12 +3,12 @@
 
 #include "Components/Playback.hpp"
 #include "Components/Rewinding.hpp"
-#include "Utilities/T4HookManager.hpp"
+#include "Utilities/HookManager.hpp"
 #include "Events.hpp"
+#include "Mod.hpp"
 #include "../Addresses.hpp"
 #include "../Structures.hpp"
 #include "../Functions.hpp"
-#include "../Patches.hpp"
 
 namespace IWXMVM::T4::Hooks::Playback
 {
@@ -92,9 +92,16 @@ namespace IWXMVM::T4::Hooks::Playback
         const auto sv_frame_va = GetGameAddresses().SV_Frame();
         if (sv_frame_va)
         {
-            T4::HookManager::CreateHook(sv_frame_va, (std::uintptr_t)SV_Frame_Hook,
-                                    (uintptr_t*)&SV_Frame_Trampoline);
-            LOG_INFO("Hooks::Playback: SV_Frame hook installed at 0x{:08X}", sv_frame_va);
+            try
+            {
+                IWXMVM::HookManager::CreateHook(sv_frame_va, (std::uintptr_t)SV_Frame_Hook,
+                                                (uintptr_t*)&SV_Frame_Trampoline);
+                LOG_INFO("Hooks::Playback: SV_Frame hook installed at 0x{:08X}", sv_frame_va);
+            }
+            catch (const std::exception& e)
+            {
+                LOG_WARN("Hooks::Playback: SV_Frame CreateHook failed: {}", e.what());
+            }
         }
 
         // core/-cleanup-1:1: Features_Rewinding bit no longer in upstream

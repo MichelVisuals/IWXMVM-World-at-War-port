@@ -11,14 +11,13 @@
 #include "Hooks/Playback.hpp"
 #include "Hooks/HUD.hpp"
 #include "Addresses.hpp"
-#include "Patches.hpp"
 #include "Components/Rewinding.hpp"
 #include "Components/Playback.hpp"
 #include "Components/CaptureManager.hpp"
 #include "Components/CameraManager.hpp"
 #include "Components/Camera.hpp"
 #include "Components/KeyframeManager.hpp"
-#include "Utilities/T4HookManager.hpp"
+#include "Utilities/HookManager.hpp"
 
 #include "glm/vec3.hpp"
 #include "glm/gtc/type_ptr.hpp"
@@ -251,12 +250,26 @@ namespace IWXMVM::T4
                 {
                     auto* mbA = ::GetProcAddress(user32, "MessageBoxA");
                     auto* mbW = ::GetProcAddress(user32, "MessageBoxW");
-                    T4::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(mbA),
-                                                reinterpret_cast<std::uintptr_t>(MessageBoxA_Hook),
-                                                reinterpret_cast<std::uintptr_t*>(&OriginalMessageBoxA));
-                    T4::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(mbW),
-                                                reinterpret_cast<std::uintptr_t>(MessageBoxW_Hook),
-                                                reinterpret_cast<std::uintptr_t*>(&OriginalMessageBoxW));
+                    if (mbA)
+                    {
+                        try
+                        {
+                            IWXMVM::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(mbA),
+                                                            reinterpret_cast<std::uintptr_t>(MessageBoxA_Hook),
+                                                            reinterpret_cast<std::uintptr_t*>(&OriginalMessageBoxA));
+                        }
+                        catch (const std::exception& e) { LOG_WARN("MessageBoxA hook failed: {}", e.what()); }
+                    }
+                    if (mbW)
+                    {
+                        try
+                        {
+                            IWXMVM::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(mbW),
+                                                            reinterpret_cast<std::uintptr_t>(MessageBoxW_Hook),
+                                                            reinterpret_cast<std::uintptr_t*>(&OriginalMessageBoxW));
+                        }
+                        catch (const std::exception& e) { LOG_WARN("MessageBoxW hook failed: {}", e.what()); }
+                    }
                     LOG_INFO("MessageBoxA/W hooks installed (IWXMVM popup suppression)");
                 }
             }
@@ -293,12 +306,26 @@ namespace IWXMVM::T4
                 {
                     auto* setCP = ::GetProcAddress(user32_2, "SetCursorPos");
                     auto* clipC = ::GetProcAddress(user32_2, "ClipCursor");
-                    T4::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(setCP),
-                                                reinterpret_cast<std::uintptr_t>(&T4_SetCursorPos_Hook),
-                                                reinterpret_cast<std::uintptr_t*>(&g_OriginalSetCursorPos));
-                    T4::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(clipC),
-                                                reinterpret_cast<std::uintptr_t>(&T4_ClipCursor_Hook),
-                                                reinterpret_cast<std::uintptr_t*>(&g_OriginalClipCursor));
+                    if (setCP)
+                    {
+                        try
+                        {
+                            IWXMVM::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(setCP),
+                                                            reinterpret_cast<std::uintptr_t>(&T4_SetCursorPos_Hook),
+                                                            reinterpret_cast<std::uintptr_t*>(&g_OriginalSetCursorPos));
+                        }
+                        catch (const std::exception& e) { LOG_WARN("SetCursorPos hook failed: {}", e.what()); }
+                    }
+                    if (clipC)
+                    {
+                        try
+                        {
+                            IWXMVM::HookManager::CreateHook(reinterpret_cast<std::uintptr_t>(clipC),
+                                                            reinterpret_cast<std::uintptr_t>(&T4_ClipCursor_Hook),
+                                                            reinterpret_cast<std::uintptr_t*>(&g_OriginalClipCursor));
+                        }
+                        catch (const std::exception& e) { LOG_WARN("ClipCursor hook failed: {}", e.what()); }
+                    }
                     LOG_INFO("SetCursorPos + ClipCursor hooks installed (caller-gated; self range 0x{:X}..0x{:X})",
                              g_t4SelfBase, g_t4SelfEnd);
                 }
@@ -562,12 +589,11 @@ namespace IWXMVM::T4
             return (uintptr_t)GetGameAddresses().MainWndProc();
         }
 
-        void SetMouseMode(Types::MouseMode mode) final
+        void SetMouseMode(Types::MouseMode /*mode*/) final
         {
-            if (mode == Types::MouseMode::Capture)
-                Patches::GetGamePatches().IN_Frame.Apply();
-            else 
-                Patches::GetGamePatches().IN_Frame.Revert();
+            // TODO(t4): re-add IN_Frame patch when its address is wired
+            // (was: Patches::GetGamePatches().IN_Frame.Apply()/.Revert()).
+            // Removed alongside the t4/src/Patches.hpp wrapper.
         }
 
         Types::GameState GetGameState() final
@@ -903,7 +929,9 @@ namespace IWXMVM::T4
                     Functions::FindDvar("ui_drawCrosshair")->current.enabled,
                     Hooks::HUD::showScore,
                     Hooks::HUD::showOtherText,
-                    !Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.IsApplied(),
+                    // TODO(t4): showBloodOverlay was inverse of CG_DrawPlayerLowHealthOverlay.IsApplied();
+                    // assume "shown" until the patch lands again (its address is unwired anyway).
+                    true,
                     Functions::FindDvar("ui_hud_obituaries")->current.string[0] == '1',
                     teamColorAllies,
                     teamColorAxis
@@ -998,18 +1026,11 @@ namespace IWXMVM::T4
                 Functions::FindDvar("ui_drawCrosshair")->current.enabled = hudInfo.showCrosshair;
                 Hooks::HUD::showScore = hudInfo.showScore;
                 Hooks::HUD::showOtherText = hudInfo.showOtherText;
-                if (hudInfo.showBloodOverlay)
-                {
-                    Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.Revert();
-                    Patches::GetGamePatches().CG_DrawFlashDamage.Revert();
-                    Patches::GetGamePatches().CG_DrawDamageDirectionIndicators.Revert();
-                }
-                else
-                {
-                    Patches::GetGamePatches().CG_DrawPlayerLowHealthOverlay.Apply();
-                    Patches::GetGamePatches().CG_DrawFlashDamage.Apply();
-                    Patches::GetGamePatches().CG_DrawDamageDirectionIndicators.Apply();
-                }
+                // TODO(t4): blood-overlay control was three patches:
+                //   CG_DrawPlayerLowHealthOverlay / CG_DrawFlashDamage / CG_DrawDamageDirectionIndicators.
+                // Re-add when those addresses are wired. The patches were
+                // removed alongside t4/src/Patches.hpp.
+                (void)hudInfo.showBloodOverlay;
 
                 std::stringstream teamColorAllies;
                 teamColorAllies << hudInfo.killfeedTeam1Color[0] << " " << hudInfo.killfeedTeam1Color[1] << " "
@@ -1269,8 +1290,9 @@ namespace IWXMVM::T4
         {
             uintptr_t CL_FirstSnapshot = GetGameAddresses().CL_FirstSnapshot();
 
-            Patches::GetGamePatches().Con_TimeJumped.Apply();
-
+            // TODO(t4): Con_TimeJumped NOP patch was Apply()'d around the call
+            // here and Revert()'d after, to suppress an audio-time-jump message.
+            // Re-add when Con_TimeJumpedCall's address is wired.
             _asm
             {
                 pushad
@@ -1278,8 +1300,6 @@ namespace IWXMVM::T4
                 call CL_FirstSnapshot
                 popad
             }
-
-            Patches::GetGamePatches().Con_TimeJumped.Revert();
         }
 
         void ResetClientData(int serverTime)

@@ -1,7 +1,7 @@
 #include "StdInclude.hpp"
 #include "HUD.hpp"
 
-#include "Utilities/T4HookManager.hpp"
+#include "Utilities/HookManager.hpp"
 #include "../Addresses.hpp"
 #include "../Structures.hpp"
 
@@ -36,8 +36,17 @@ namespace IWXMVM::T4::Hooks::HUD
 
     void Install()
     {
-        T4::HookManager::CreateHook(GetGameAddresses().R_AddCmdDrawTextWithEffects(),
-                                (std::uintptr_t)R_AddCmdDrawTextWithEffects_Hook,
-                                (uintptr_t*)&R_AddCmdDrawTextWithEffects_Trampoline);
+        if (const auto a = GetGameAddresses().R_AddCmdDrawTextWithEffects(); a)
+        {
+            try
+            {
+                IWXMVM::HookManager::CreateHook(a, (std::uintptr_t)R_AddCmdDrawTextWithEffects_Hook,
+                                                (uintptr_t*)&R_AddCmdDrawTextWithEffects_Trampoline);
+            }
+            catch (const std::exception& e)
+            {
+                LOG_WARN("Hooks::HUD: R_AddCmdDrawTextWithEffects CreateHook failed: {}", e.what());
+            }
+        }
     }
 }  // namespace IWXMVM::T4::Hooks::Playback

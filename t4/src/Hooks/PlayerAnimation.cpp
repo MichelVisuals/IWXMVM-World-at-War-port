@@ -5,7 +5,7 @@
 #include "../Structures.hpp"
 #include "Components/PlayerAnimation.hpp"
 #include "Mod.hpp"
-#include "Utilities/T4HookManager.hpp"
+#include "Utilities/HookManager.hpp"
 
 namespace IWXMVM::T4::Hooks::PlayerAnimation
 {    
@@ -148,7 +148,17 @@ namespace IWXMVM::T4::Hooks::PlayerAnimation
 
     void Install()
     {
-        T4::HookManager::CreateHook(GetGameAddresses().CG_ProcessEntity(), (std::uintptr_t)CG_ProcessEntity_Hook,
-                                &CG_ProcessEntity_Trampoline);
+        if (const auto a = GetGameAddresses().CG_ProcessEntity(); a)
+        {
+            try
+            {
+                IWXMVM::HookManager::CreateHook(a, (std::uintptr_t)CG_ProcessEntity_Hook,
+                                                &CG_ProcessEntity_Trampoline);
+            }
+            catch (const std::exception& e)
+            {
+                LOG_WARN("Hooks::PlayerAnimation: CG_ProcessEntity CreateHook failed: {}", e.what());
+            }
+        }
     }
 }  // namespace IWXMVM::T4::Hooks::PlayerAnimation

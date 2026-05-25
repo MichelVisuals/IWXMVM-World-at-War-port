@@ -1,7 +1,9 @@
 #include "StdInclude.hpp"
 #include "Rendering.hpp"
 
-#include "Utilities/T4HookManager.hpp"
+#include "Utilities/HookManager.hpp"
+#include "Components/Rendering.hpp"
+#include "Types/RenderingFlags.hpp"
 #include "../Structures.hpp"
 #include "../Addresses.hpp"
 #include "../Functions.hpp"
@@ -88,7 +90,17 @@ namespace IWXMVM::T4::Hooks::Rendering
 
     void Install()
     {
-        T4::HookManager::CreateHook(GetGameAddresses().R_SetupMaterial(), (std::uintptr_t)R_SetupMaterial_Hook,
-                                (uintptr_t *)&R_SetupMaterial_Trampoline);
+        if (const auto a = GetGameAddresses().R_SetupMaterial(); a)
+        {
+            try
+            {
+                IWXMVM::HookManager::CreateHook(a, (std::uintptr_t)R_SetupMaterial_Hook,
+                                                (uintptr_t *)&R_SetupMaterial_Trampoline);
+            }
+            catch (const std::exception& e)
+            {
+                LOG_WARN("Hooks::Rendering: R_SetupMaterial CreateHook failed: {}", e.what());
+            }
+        }
     }
 }  // namespace IWXMVM::T4::Hooks::Rendering
