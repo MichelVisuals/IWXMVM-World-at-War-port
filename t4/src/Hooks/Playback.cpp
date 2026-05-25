@@ -97,18 +97,11 @@ namespace IWXMVM::T4::Hooks::Playback
             LOG_INFO("Hooks::Playback: SV_Frame hook installed at 0x{:08X}", sv_frame_va);
         }
 
-        // FS_Read hook is gated on Features_Rewinding. Without that flag,
-        // Components::Rewinding::FS_Read would memcpy clientInfo out of
-        // cg_s using IW3 offsets that don't match T4 yet → silent corruption.
-        const bool rewindingSupported =
-            (Mod::GetGameInterface()->GetSupportedFeatures() & Types::Features_Rewinding) != 0;
-        const auto fs_read_va = GetGameAddresses().FS_Read();
-        const auto fsh_va = GetGameAddresses().fsh();
-        if (fs_read_va && fsh_va && rewindingSupported)
-        {
-            HookManager::CreateHook(fs_read_va, (std::uintptr_t)FS_Read_Hook,
-                                    (uintptr_t*)&FS_Read_Trampoline);
-            LOG_INFO("Hooks::Playback: FS_Read hook installed at 0x{:08X}", fs_read_va);
-        }
+        // core/-cleanup-1:1: Features_Rewinding bit no longer in upstream
+        // Features.hpp. FS_Read hook is permanently disabled here — Rewinding
+        // state machine wouldn't function correctly anyway without the
+        // gating logic that lived in core/Playback.cpp / core/Rewinding.cpp.
+        // To re-enable rewind, the upstream Features_Rewinding bit would
+        // need to be re-introduced via a different mechanism.
     }
 }  // namespace IWXMVM::T4::Hooks::Playback

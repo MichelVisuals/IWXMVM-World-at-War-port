@@ -27,7 +27,10 @@ namespace IWXMVM::T4
     class T4Interface : public GameInterface
     {
        public:
-        T4Interface() : GameInterface(Types::Game::T4)
+        // core/-cleanup-1:1: Game::T4 enum entry no longer in upstream core.
+        // Pass Game::None — there's no semantic dispatch on the value in core,
+        // it's just a label for debug/logging.
+        T4Interface() : GameInterface(Types::Game::None)
         {
         }
 
@@ -193,30 +196,10 @@ namespace IWXMVM::T4
                 Functions::FindDvar("con_gamemsgwindow0linecount")->current.integer = 4;
             });
 
-            // Backward-seek-via-restart driver. After SeekBackward restarts
-            // the demo, the playhead resets near tick 0. Once it's clearly
-            // back at the start (gameTick < target), fast-forward to the
-            // target via Components::Playback::SkipDemoForward (which writes
-            // cls.realtime + ticks).
-            Events::RegisterListener(EventType::OnFrame, [&]() {
-                if (pendingSkipForwardTarget < 0) return;
-                if (GetGameState() != Types::GameState::InDemo) return;
-
-                const auto curTick = static_cast<std::int32_t>(GetDemoInfo().gameTick);
-
-                // Wait until the demo has clearly restarted (curTick below
-                // the target by a healthy margin). This avoids racing the
-                // OnFrame against PlayDemo's PostDemoLoad flow.
-                if (curTick >= pendingSkipForwardTarget)
-                    return;
-
-                // Demo has restarted and is BEFORE the target. Fast-forward.
-                const auto delta = pendingSkipForwardTarget - curTick;
-                LOG_INFO("backward-seek: post-restart curTick={} target={} -> SkipDemoForward({})",
-                         curTick, pendingSkipForwardTarget, delta);
-                Components::Playback::SkipDemoForward(delta);
-                pendingSkipForwardTarget = -1;
-            });
+            // core/-cleanup-1:1: backward-seek driver removed. Depended on
+            // SeekBackward virtual + Features_SkipForwardOnly bit, both of
+            // which are now out of core/. If demo seek is wanted back, wire
+            // FS_Read first and use the full Rewinding state machine.
 
             // T4 port 2026-05-24: TRUE PAUSE via cls.realtime freeze.
             // The engine's per-frame ADD [cls.realtime], ESI at 0x004998BA
@@ -368,13 +351,9 @@ namespace IWXMVM::T4
 
         Types::Features GetSupportedFeatures() final
         {
-            // T4 port 2026-05-24: cls.realtime is wired (0x00BD3628 via
-            // clientStatic + offset 0x118) so SkipDemoForward works without
-            // any FS_Read or SV_Frame infrastructure. Enable forward-scrub
-            // via Features_SkipForwardOnly. RewindBy still gated off until
-            // FS_Read + snapshot machinery lands.
-            return (Types::Features)(Types::Features_ChangeAnimations |
-                                     Types::Features_SkipForwardOnly);
+            // core/-cleanup-1:1: Features_SkipForwardOnly no longer in
+            // upstream Features.hpp. Only ChangeAnimations is supported.
+            return Types::Features_ChangeAnimations;
         }
 
         void InitializeGameAddresses() final
@@ -402,32 +381,8 @@ namespace IWXMVM::T4
         std::string lastDemoStem;
         std::filesystem::path lastDemoPath;
 
-        // Backward-seek-via-restart state. When SeekBackward is called, we
-        // store the target tick here, restart the demo, and the OnFrame
-        // listener installed in SetupEventListeners catches the post-restart
-        // tick (when gameTick resets near 0) and calls SkipDemoForward to
-        // reach the target.
-        std::int32_t pendingSkipForwardTarget = -1;
-
-        void SeekBackward(std::int32_t deltaTicks) final
-        {
-            // Compute absolute target tick (clamp to 0 if too far back).
-            auto demoInfo = GetDemoInfo();
-            std::int32_t target = static_cast<std::int32_t>(demoInfo.gameTick) + deltaTicks;
-            if (target < 0) target = 0;
-            pendingSkipForwardTarget = target;
-
-            LOG_INFO("SeekBackward: delta={} curTick={} target={} — restarting demo",
-                     deltaTicks, demoInfo.gameTick, target);
-
-            if (lastDemoPath.empty())
-            {
-                LOG_WARN("SeekBackward: no lastDemoPath stored, cannot restart");
-                pendingSkipForwardTarget = -1;
-                return;
-            }
-            PlayDemo(lastDemoPath);
-        }
+        // core/-cleanup-1:1: SeekBackward override + pendingSkipForwardTarget
+        // removed. The virtual no longer exists in upstream GameInterface.
 
         Types::DemoInfo GetDemoInfo() final
         {
