@@ -68,19 +68,6 @@ namespace IWXMVM::D3D9
     SetCursorPos_t OriginalSetCursorPos = nullptr;
     BOOL WINAPI SetCursorPos_Hook(int X, int Y)
     {
-        // One-shot diagnostic: confirm the hook is actually being called and
-        // log whether we're suppressing or passing through. Helps debug the
-        // "cursor still locked" scenario.
-        static bool dbg_logged = false;
-        if (!dbg_logged)
-        {
-            dbg_logged = true;
-            LOG_DEBUG("SetCursorPos_Hook fired (first call): X={} Y={} captured={} inDemo={}",
-                      X, Y,
-                      UI::UIManager::Get().IsInputCaptured(),
-                      Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo);
-        }
-
         // T4 port (2026-05-23): when GameView::LockMouse is the caller, ALWAYS
         // let the SetCursorPos through. LockMouse needs to actually warp the
         // cursor to viewportCenter for its MousePosPrev compensation trick

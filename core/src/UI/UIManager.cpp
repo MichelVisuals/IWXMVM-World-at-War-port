@@ -43,8 +43,6 @@ namespace IWXMVM::UI
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            // T4 port: Input + component init enabled. Demo window dropped.
-            // Re-enabling actual IWXMVM components one by one.
             Input::UpdateState(ImGui::GetIO());
 
             if (!uiComponentsInitialized)
@@ -53,61 +51,6 @@ namespace IWXMVM::UI
                     component->Initialize();
                 uiComponentsInitialized = true;
             }
-
-            if (!hideOverlay)
-            {
-                // T4 port: per-component try/catch so a throw in one component
-                // doesn't take down the entire overlay. The catch logs each
-                // component's failure once (on transition) so we can pinpoint
-                // which one tries to read unwired engine state in InDemo mode.
-#define RENDER_ONE(comp_enum, comp_name)                                                       \
-    do                                                                                          \
-    {                                                                                           \
-        static bool _logged_##comp_enum = false;                                                \
-        try                                                                                     \
-        {                                                                                       \
-            GetUIComponent(Component::comp_enum)->Render();                                     \
-        }                                                                                       \
-        catch (const std::exception& _e)                                                        \
-        {                                                                                       \
-            if (!_logged_##comp_enum)                                                           \
-            {                                                                                   \
-                _logged_##comp_enum = true;                                                     \
-                LOG_CRITICAL("Component '" comp_name "' threw std::exception: {} (further silenced)", _e.what()); \
-            }                                                                                   \
-        }                                                                                       \
-        catch (...)                                                                             \
-        {                                                                                       \
-            if (!_logged_##comp_enum)                                                           \
-            {                                                                                   \
-                _logged_##comp_enum = true;                                                     \
-                LOG_CRITICAL("Component '" comp_name "' threw non-std exception (further silenced)"); \
-            }                                                                                   \
-        }                                                                                       \
-    } while (0)
-                RENDER_ONE(Background, "Background");
-                RENDER_ONE(MenuBar, "MenuBar");
-                RENDER_ONE(GameView, "GameView");
-                RENDER_ONE(PrimaryTabs, "PrimaryTabs");
-                RENDER_ONE(ControlBar, "ControlBar");
-                RENDER_ONE(ControlsMenu, "ControlsMenu");
-                RENDER_ONE(Preferences, "Preferences");
-                RENDER_ONE(PlayerAnimation, "PlayerAnimation");
-                RENDER_ONE(Credits, "Credits");
-#undef RENDER_ONE
-            }
-
-            // T4 port: invoke OnFrame after components render so per-frame
-            // listeners (CameraManager, CaptureManager, KeyframeManager,
-            // VisualsMenu, T4Interface pause-via-timescale, etc.) actually
-            // run. This was being skipped due to the early-return below,
-            // which is leftover diagnostic code from the T4 bisect.
-            Events::Invoke(EventType::OnFrame);
-
-            ImGui::EndFrame();
-            ImGui::Render();
-            ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
-            return;
 
             if (Input::KeyDown(ImGuiKey_F1))
             {
@@ -126,18 +69,15 @@ namespace IWXMVM::UI
 
             if (!hideOverlay)
             {
-                // T4 port diagnostic: ALL component renders disabled. If popup
-                // gone -> a component render throws. If still fires -> bug is
-                // in component Initialize() or surrounding ImGui setup.
-                // GetUIComponent(Component::Background)->Render();
-                // GetUIComponent(Component::MenuBar)->Render();
-                // GetUIComponent(Component::GameView)->Render();
-                // GetUIComponent(Component::PrimaryTabs)->Render();
-                // GetUIComponent(Component::ControlBar)->Render();
-                // GetUIComponent(Component::ControlsMenu)->Render();
-                // GetUIComponent(Component::Preferences)->Render();
-                // GetUIComponent(Component::PlayerAnimation)->Render();
-                // GetUIComponent(Component::Credits)->Render();
+                GetUIComponent(Component::Background)->Render();
+                GetUIComponent(Component::MenuBar)->Render();
+                GetUIComponent(Component::GameView)->Render();
+                GetUIComponent(Component::PrimaryTabs)->Render();
+                GetUIComponent(Component::ControlBar)->Render();
+                GetUIComponent(Component::ControlsMenu)->Render();
+                GetUIComponent(Component::Preferences)->Render();
+                GetUIComponent(Component::PlayerAnimation)->Render();
+                GetUIComponent(Component::Credits)->Render();
             }
 
             if (showImGuiDemo)
@@ -163,8 +103,9 @@ namespace IWXMVM::UI
         }
         catch (...)
         {
-            // T4 port WIP: silence the MessageBox spam (was firing every frame).
-            // Log once per process so we know it's happening without 60+ popups/sec.
+            // Log once per process — the upstream MessageBox popped every
+            // frame the catch fired, which froze the user behind a popup
+            // wall when a hot path threw repeatedly.
             static bool logged_once = false;
             if (!logged_once)
             {
@@ -178,9 +119,9 @@ namespace IWXMVM::UI
     {
         auto& uiManager = UIManager::Get();
 
-        // Insert key is a convenience hotkey for the same toggle exposed in
-        // the menu bar. Handled BEFORE the suppression check so it can
-        // always turn capture OFF.
+        // Insert key toggles whether IWXMVM owns input (same toggle as the
+        // menu-bar button). Handled before the capture-filter below so it
+        // can always turn capture OFF.
         if (uMsg == WM_KEYDOWN && wParam == VK_INSERT)
         {
             uiManager.ToggleInputCaptured();
@@ -200,8 +141,6 @@ namespace IWXMVM::UI
             ShowCursor(TRUE);
         }
 
-        // Always feed input to ImGui so the overlay can react regardless of
-        // capture mode.
         if (ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
         {
             return true;
@@ -209,7 +148,8 @@ namespace IWXMVM::UI
 
         // When IWXMVM owns input, swallow mouse + keyboard messages so they
         // don't reach the game's WndProc. WndProc-level substitute for the
-        // IN_Frame engine patch (still HardAddr<0> for T4).
+        // IN_Frame engine patch when that patch isn't wired for a given
+        // game binding.
         if (uiManager.IsInputCaptured())
         {
             const bool isMouseMsg = (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST);
@@ -293,13 +233,9 @@ namespace IWXMVM::UI
             LOG_DEBUG("Initializing ImGui_ImplDX9 with D3D9 Device {0:x}", (std::uintptr_t)device);
             ImGui_ImplDX9_Init(device);
 
-            // SetWindowLongPtr captures whatever WndProc Windows currently has
-            // — we don't actually need Mod::GetWndProc() (that was only used
-            // for the log line). Always install our WndProc handler so ImGui
-            // gets input via Windows messages.
-            LOG_DEBUG("Hooking WndProc on hwnd {0:x}", (std::uintptr_t)hwnd);
+            // TODO: byte size is game dependent
+            LOG_DEBUG("Hooking WndProc at {0:x}", Mod::GetGameInterface()->GetWndProc());
             originalGameWndProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (std::uintptr_t)ImGuiWndProc);
-            LOG_DEBUG("Original WndProc captured at {0:x}", (std::uintptr_t)originalGameWndProc);
 
             auto windowSize = GetWindowSize(hwnd);
             auto fontSize = std::floor(windowSize.x / 106.0f);

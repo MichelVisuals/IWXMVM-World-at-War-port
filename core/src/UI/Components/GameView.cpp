@@ -292,24 +292,16 @@ namespace IWXMVM::UI
 
     void HandleInput()
     {
-        #define HI_STAGE(tag) do { static bool _l=false; if(!_l){_l=true; LOG_DEBUG("HandleInput stage: " tag);} } while(0)
-        HI_STAGE("H0: enter");
         // Only handle input if no text input is active
         if (ImGui::GetIO().WantTextInput)
             return;
-        HI_STAGE("H1: post WantTextInput");
 
         if (Components::CaptureManager::Get().IsCapturing())
             return;
-        HI_STAGE("H2: post CaptureManager::IsCapturing");
 
         auto& cameraManager = Components::CameraManager::Get();
-        HI_STAGE("H3: post CameraManager::Get");
 
-        HI_STAGE("H3a: pre Input::KeyDown(1)");
-        bool k1 = Input::KeyDown(ImGuiKey_1);
-        HI_STAGE("H3b: post Input::KeyDown(1)");
-        if (k1)
+        if (Input::KeyDown(ImGuiKey_1))
         {
             cameraManager.SetActiveCamera(Components::Camera::Mode::FirstPerson);
         }
@@ -337,38 +329,23 @@ namespace IWXMVM::UI
 
     void GameView::Render()
     {
-        // T4 port diagnostic: one-shot stage logging. Each LOG_DEBUG below
-        // fires exactly once per process so we can pinpoint where the
-        // previously-reported GameView crash occurs without spamming 60/sec.
-        // Remove these once the GameView is confirmed working on WaW.
-        static bool dbg_logged_enter = false;
-        if (!dbg_logged_enter) { dbg_logged_enter = true; LOG_DEBUG("GameView::Render ENTER"); }
-
         wasGizmoButtonClickedThisFrame = false;
 
-        #define DBG_STAGE(tag) do { static bool _l=false; if(!_l){_l=true; LOG_DEBUG("GameView stage: " tag);} } while(0)
-
-        DBG_STAGE("A: pre SetNextWindowPos/Size");
         ImGui::SetNextWindowPos(GetPosition());
         ImGui::SetNextWindowSize(GetSize());
 
-        DBG_STAGE("B: pre LockMouse check");
         if (HasFocus() && UIManager::Get().IsControllableCameraModeSelected())
             LockMouse();
 
-        DBG_STAGE("C: pre HandleInput");
         HandleInput();
 
-        DBG_STAGE("D: pre PushStyleVar/Begin");
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
 
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav |
                                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoTitleBar;
         ImGui::Begin("GameView", NULL, flags);
 
-        DBG_STAGE("E: post ImGui::Begin");
         auto isGameFocused = D3D9::FindWindowHandle() == GetForegroundWindow();
-        DBG_STAGE("F: post FindWindowHandle");
         if (HasFocus() &&
             (Input::KeyDown(ImGuiKey_Escape) || Input::BindDown(Action::FreeCameraActivate) || !isGameFocused))
         {
@@ -377,9 +354,7 @@ namespace IWXMVM::UI
         }
         else
         {
-            DBG_STAGE("G: pre CameraManager::GetActiveCamera");
             const auto& camera = Components::CameraManager::Get().GetActiveCamera();
-            DBG_STAGE("H: post GetActiveCamera");
             bool shouldHaveFocus = false;
             if (UIManager::Get().IsControllableCameraModeSelected())
                 shouldHaveFocus = Input::BindDown(Action::FreeCameraActivate);
@@ -387,7 +362,6 @@ namespace IWXMVM::UI
                 shouldHaveFocus = ImGui::IsWindowFocused();
             SetHasFocus(HasFocus() || shouldHaveFocus);
         }
-        DBG_STAGE("I: post focus block");
 
         auto currentPos = ImGui::GetWindowPos();
         auto currentSize = ImGui::GetWindowSize();
@@ -432,8 +406,6 @@ namespace IWXMVM::UI
         auto newTextureSize = viewportSize;
         if (textureSize.x != newTextureSize.x || textureSize.y != newTextureSize.y)
         {
-            static bool dbg_logged_create = false;
-            if (!dbg_logged_create) { dbg_logged_create = true; LOG_DEBUG("GameView: CreateTexture size {}x{}", newTextureSize.x, newTextureSize.y); }
             textureSize = newTextureSize;
             D3D9::CreateTexture(texture, textureSize);
         }
@@ -442,20 +414,13 @@ namespace IWXMVM::UI
         // otherwise, for a brief second, you'd see the first frame of the demo
         if (!Components::Rewinding::IsRewinding())
         {
-            static bool dbg_logged_capture = false;
-            if (!dbg_logged_capture) { dbg_logged_capture = true; LOG_DEBUG("GameView: CaptureBackBuffer about to run"); }
+            // CaptureBackBuffer failure used to throw; swallow instead so a
+            // transient device-lost / format-mismatch frame doesn't tear
+            // down the whole UI render path. The next frame retries.
             if (!D3D9::CaptureBackBuffer(texture))
             {
-                static bool dbg_logged_capfail = false;
-                if (!dbg_logged_capfail) { dbg_logged_capfail = true; LOG_DEBUG("GameView: CaptureBackBuffer FAILED (returning false, not throwing on T4)"); }
-                // T4 port: previously threw std::exception("Failed to capture game view");
-                // outer UIManager catch logged + silenced. Swallow here so we
-                // can keep diagnosing further down the function.
-            }
-            else
-            {
-                static bool dbg_logged_capok = false;
-                if (!dbg_logged_capok) { dbg_logged_capok = true; LOG_DEBUG("GameView: CaptureBackBuffer OK"); }
+                static bool warned = false;
+                if (!warned) { warned = true; LOG_WARN("GameView: CaptureBackBuffer failed (suppressed; will retry next frame)"); }
             }
         }
 
@@ -488,11 +453,7 @@ namespace IWXMVM::UI
             ImGui::Image((void*)texture, textureSize); 
         }
 
-        static bool dbg_logged_before_image = false;
-        if (!dbg_logged_before_image) { dbg_logged_before_image = true; LOG_DEBUG("GameView: ImGui::Image drawn, about to Invoke(OnRenderGameView)"); }
         Events::Invoke(EventType::OnRenderGameView);
-        static bool dbg_logged_after_invoke = false;
-        if (!dbg_logged_after_invoke) { dbg_logged_after_invoke = true; LOG_DEBUG("GameView: OnRenderGameView listeners returned"); }
         if (Mod::GetGameInterface()->GetGameState() == Types::GameState::InDemo)
         {
             DrawGizmoControls();
